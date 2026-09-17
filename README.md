@@ -86,7 +86,23 @@ MCP-сервер (Model Context Protocol) для сервиса электрон
 
 ---
 
-## Запуск
+## Развёртывание
+
+Сервер живёт на той же машине, что enote-mcp и bas-corp-mcp (`debian` в тайлнете), по той же схеме: образ в GHCR, обновление через watchtower, публичное имя — через openresty на `ha-dvin`.
+
+```bash
+docker compose up -d          # ghcr.io/david-dvinskykh/vchasno-edo-mcp:latest, порт 8089 → 8080
+```
+
+| | enote-mcp | bas-corp-mcp | vchasno-edo-mcp |
+|---|---|---|---|
+| Порт на хосте | 8085 | 8087 | **8089** |
+| Публичное имя | enote-mcp.ha-dvin.pp.ua | bas-mcp.ha-dvin.pp.ua | **vchasno-mcp.ha-dvin.pp.ua** |
+| Образ | `enote-mcp-server:main` | `bas-corp-mcp:latest` | `vchasno-edo-mcp:latest` |
+
+Образ собирается и публикуется GitHub Actions (`.github/workflows/docker-publish.yml`) при пуше в `main` — linux/amd64 и linux/arm64.
+
+## Запуск вручную
 
 ```bash
 go build -o vchasno-edo-mcp ./cmd/vchasno-edo-mcp

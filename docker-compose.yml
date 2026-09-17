@@ -1,0 +1,49 @@
+# Deployment of vchasno-edo-mcp, matching how enote-mcp and bas-corp-mcp run
+# on the same host: a GHCR image, a watchtower label for auto-updates, a
+# health check, a memory limit and a volume holding the RSA key so that
+# issued access tokens survive a restart.
+services:
+  vchasno-edo-mcp:
+    image: ghcr.io/david-dvinskykh/vchasno-edo-mcp:latest
+    ports:
+      - "8089:8080"
+    environment:
+      MCP_HOST: "0.0.0.0"
+      MCP_PORT: "8080"
+      MCP_ISSUER_URL: "https://vchasno-mcp.ha-dvin.pp.ua"
+      MCP_VCHASNO_URL: "https://edo.vchasno.ua"
+      MCP_JWT_KEY_DIR: "/app/data"
+      MCP_DOWNLOAD_DIR: "/app/data/downloads"
+      MCP_JWT_EXPIRY_DAYS: "365"
+      MCP_MAX_RPS: "8"                # Vchasno allows 10 req/s per company
+      MCP_DEFAULT_PAGE_SIZE: "25"
+      MCP_MAX_PAGE_SIZE: "100"
+      MCP_MAX_PAGES: "20"
+      MCP_MAX_UPLOAD_MB: "15"
+      MCP_API_TIMEOUT_SEC: "90"
+      MCP_LOG_LEVEL: "info"
+      # MCP_VCHASNO_TOKEN is deliberately absent: every client logs in with its
+      # own token through OAuth. Set it only for a single-company server.
+    restart: unless-stopped
+    volumes:
+      - vchasno-mcp-data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+
+volumes:
+  vchasno-mcp-data:
