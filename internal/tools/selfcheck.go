@@ -82,8 +82,10 @@ func (d *Deps) registerSelfCheck(srv *mcp.Server) {
 				add("archive_folders", derr, fmt.Sprintf("%d folders at the root", len(dirsOf(dirs))))
 				dreqs, dqerr := api.ListDeleteRequests(ctx, "", nil, nil, "")
 				add("delete_requests", dqerr, fmt.Sprintf("%d requests", len(dreqs)))
-				comments, cmerr := api.ListComments(ctx, "", "", "")
-				add("comment_feed", cmerr, fmt.Sprintf("%d comments in the first page", len(commentsOf(comments))))
+				// The feed rejects an unbounded request, so probe a real window.
+				from := time.Now().AddDate(0, 0, -30).Format("2006-01-02")
+				comments, cmerr := api.ListComments(ctx, from, time.Now().Format("2006-01-02"), "")
+				add("comment_feed", cmerr, fmt.Sprintf("%d comments in the last 30 days", len(commentsOf(comments))))
 			}
 
 			passed, failed := 0, 0

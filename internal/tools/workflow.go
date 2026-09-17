@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"strings"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -101,8 +102,8 @@ type documentIDIn struct {
 }
 
 type commentsFeedIn struct {
-	DateFrom string `json:"date_from,omitempty" jsonschema:"Comments on or after this date"`
-	DateTo   string `json:"date_to,omitempty" jsonschema:"Comments on or before this date"`
+	DateFrom string `json:"date_from,omitempty" jsonschema:"Comments on or after this date. The API requires a bounded period, so leaving this out falls back to 30 days ago"`
+	DateTo   string `json:"date_to,omitempty" jsonschema:"Comments on or before this date. Leaving this out falls back to today"`
 	Cursor   string `json:"cursor,omitempty" jsonschema:"next_cursor from a previous answer"`
 	Pages    int    `json:"pages,omitempty" jsonschema:"How many cursor pages to walk (default 1)"`
 }
@@ -175,16 +176,29 @@ func (d *Deps) registerWorkflow(srv *mcp.Server) {
 		})
 
 	addRead(srv, "list_comments", "Стрічка коментарів",
-		"The company-wide comment feed over a period: comments, rejection reasons and the messages attached to deletion requests and revocation acts, each with its document id, author and type.",
+		"The company-wide comment feed over a period: comments, rejection reasons and the messages attached to deletion requests and revocation acts, each with its document id, author and type. The API rejects an unbounded request, so a missing date is filled in with the last 30 days.",
 		func(ctx context.Context, _ *mcp.CallToolRequest, in commentsFeedIn) (*mcp.CallToolResult, any, error) {
 			if err := d.requireOpen(); err != nil {
 				return fail(err)
+			}
+			// The service answers 400 invalid_request unless both ends of the
+			// period are given, which its documentation does not mention.
+			from, to := strings.TrimSpace(in.DateFrom), strings.TrimSpace(in.DateTo)
+			var notes []string
+			if from == "" || to == "" {
+				if to == "" {
+					to = time.Now().Format("2006-01-02")
+				}
+				if from == "" {
+					from = time.Now().AddDate(0, 0, -30).Format("2006-01-02")
+				}
+				notes = append(notes, "the API needs a bounded period, so the window "+from+" … "+to+" was used")
 			}
 			pages := d.pages(in.Pages)
 			cursor := in.Cursor
 			var all []vchasno.Comment
 			for i := 0; i < pages; i++ {
-				list, err := d.api(ctx).ListComments(ctx, in.DateFrom, in.DateTo, cursor)
+				list, err := d.api(ctx).ListComments(ctx, from, to, cursor)
 				if err != nil {
 					return fail(err)
 				}
@@ -195,9 +209,12 @@ func (d *Deps) registerWorkflow(srv *mcp.Server) {
 				}
 				cursor = *list.NextCursor
 			}
-			out := map[string]any{"count": len(all), "comments": all}
+			out := map[string]any{"count": len(all), "period": from + " … " + to, "comments": all}
 			if cursor != "" {
 				out["next_cursor"] = cursor
+			}
+			if len(notes) > 0 {
+				out["notes"] = notes
 			}
 			return ok(out)
 		})

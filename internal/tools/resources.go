@@ -391,6 +391,7 @@ func (d *Deps) buildErrors(_ context.Context) (string, error) {
 - **400 on an edit** — usually the status: attributes are frozen from 7003 upwards, the counterparty cannot be changed once they have signed, and a public link only exists for a document in 7000.
 - **400 on a public link** — ` + "`access_days`" + ` must be 1, 3, 5, 7, 14 or 30, and ` + "`recipient_email`" + ` and ` + "`email_text`" + ` go together or not at all.
 - **400 on a report** — the period may not exceed 30 days and may not start more than a year ago.
+- **400 invalid_request on the comment feed** — ` + "`/documents/comments`" + ` refuses an unbounded request: it needs both ends of the period, which its documentation does not mention. ` + "`list_comments`" + ` fills a missing date in with the last 30 days and says so.
 
 Every tool of this server answers a failure with ` + "`error`" + `, the API's own ` + "`code`" + ` and ` + "`status`" + `, and a ` + "`hint`" + ` saying what to do — read the hint before retrying.
 `, nil

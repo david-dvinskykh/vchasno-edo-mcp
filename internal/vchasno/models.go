@@ -105,19 +105,21 @@ type UpdatedIDs struct {
 
 // DownloadLink is one row of /download-documents.
 type DownloadLink struct {
-	ID          string `json:"id"`
-	Extension   string `json:"extension,omitempty"`
-	ArchiveURL  string `json:"archive_url,omitempty"`
-	OriginalURL string `json:"original_url,omitempty"`
-	Status      int    `json:"status,omitempty"`
-	XMLToPDFURL string `json:"xml_to_pdf_url,omitempty"`
+	ID          string     `json:"id"`
+	Extension   string     `json:"extension,omitempty"`
+	ArchiveURL  string     `json:"archive_url,omitempty"`
+	OriginalURL string     `json:"original_url,omitempty"`
+	Status      FlexString `json:"status,omitempty"`
+	XMLToPDFURL *string    `json:"xml_to_pdf_url,omitempty"`
 }
 
-// DownloadBatch is the answer of /download-documents.
+// DownloadBatch is the answer of /download-documents. The service sends
+// `status` as text and `ready` / `pending` as 1 / 0, which is not what its
+// documentation says, so both are decoded leniently.
 type DownloadBatch struct {
-	Status    int            `json:"status"`
-	Ready     bool           `json:"ready"`
-	Pending   bool           `json:"pending"`
+	Status    FlexString     `json:"status"`
+	Ready     FlexBool       `json:"ready"`
+	Pending   FlexBool       `json:"pending"`
 	Total     int            `json:"total"`
 	Documents []DownloadLink `json:"documents"`
 }

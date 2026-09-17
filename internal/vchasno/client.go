@@ -173,6 +173,21 @@ type Response struct {
 	Filename    string // from Content-Disposition, when the answer is a file
 }
 
+// looksJSON reports whether the body is worth decoding. Several Vchasno
+// endpoints answer a successful write with plain text ("201: Created") or with
+// nothing at all; treating that as a decode failure would report a successful
+// call as an error.
+func (r *Response) looksJSON() bool {
+	body := bytes.TrimSpace(r.Body)
+	if len(body) == 0 {
+		return false
+	}
+	if ct := strings.ToLower(r.ContentType); ct != "" && !strings.Contains(ct, "json") {
+		return false
+	}
+	return body[0] == '{' || body[0] == '['
+}
+
 // JSON unmarshals the body into out. A zero-length body is not an error:
 // several Vchasno endpoints answer 200/204 with nothing.
 func (r *Response) JSON(out any) error {
@@ -324,7 +339,7 @@ func (c *Client) do(ctx context.Context, method, path string, q *Values, body []
 			}
 			return r, apiErr
 		}
-		if out != nil {
+		if out != nil && r.looksJSON() {
 			if err := r.JSON(out); err != nil {
 				return r, err
 			}

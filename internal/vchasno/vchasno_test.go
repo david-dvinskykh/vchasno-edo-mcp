@@ -213,3 +213,87 @@ func TestCredentialsRedacted(t *testing.T) {
 		t.Error("a short token must be fully masked")
 	}
 }
+
+func TestNonJSONSuccessIsNotAnError(t *testing.T) {
+	// The trial-activation endpoint answers 201 with the plain text
+	// "201: Created". A successful call must not be reported as a failure
+	// just because the body is not JSON.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte("201: Created"))
+	}))
+	defer srv.Close()
+	c := vchasno.New(vchasno.Credentials{BaseURL: srv.URL, Token: "t"}, vchasno.Options{MaxRPS: 50})
+	out, err := c.ActivateIntegrationTrial(context.Background())
+	if err != nil {
+		t.Fatalf("a 201 with a plain-text body must succeed, got %v", err)
+	}
+	if len(out) != 0 {
+		t.Errorf("nothing should have been decoded, got %v", out)
+	}
+}
+
+func TestEmptyBodyIsNotAnError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	c := vchasno.New(vchasno.Credentials{BaseURL: srv.URL, Token: "t"}, vchasno.Options{MaxRPS: 50})
+	if err := c.DeleteDocument(context.Background(), "doc-1"); err != nil {
+		t.Errorf("a 204 with no body must succeed, got %v", err)
+	}
+}
+
+func TestDownloadBatchAcceptsBothShapes(t *testing.T) {
+	// What the documentation promises, and what the live service actually
+	// sends, must both decode.
+	shapes := []string{
+		`{"status":200,"ready":true,"pending":false,"total":1,"documents":[{"id":"a","status":7008}]}`,
+		`{"status":"ready","ready":1,"pending":0,"total":1,"documents":[{"id":"a","status":"ready","xml_to_pdf_url":null}]}`,
+	}
+	for _, shape := range shapes {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(shape))
+		}))
+		c := vchasno.New(vchasno.Credentials{BaseURL: srv.URL, Token: "t"}, vchasno.Options{MaxRPS: 50})
+		batch, err := c.DownloadLinks(context.Background(), []string{"a"})
+		srv.Close()
+		if err != nil {
+			t.Fatalf("shape %s: %v", shape, err)
+		}
+		if !bool(batch.Ready) {
+			t.Errorf("shape %s: ready did not decode as true", shape)
+		}
+		if bool(batch.Pending) {
+			t.Errorf("shape %s: pending did not decode as false", shape)
+		}
+		if len(batch.Documents) != 1 || batch.Documents[0].ID != "a" {
+			t.Errorf("shape %s: documents did not decode: %+v", shape, batch.Documents)
+		}
+		if batch.Status.String() == "" {
+			t.Errorf("shape %s: status is empty", shape)
+		}
+	}
+}
+
+func TestFlexBoolAndFlexString(t *testing.T) {
+	var b vchasno.FlexBool
+	for _, in := range []string{"true", "1", `"1"`, "2"} {
+		if err := b.UnmarshalJSON([]byte(in)); err != nil || !bool(b) {
+			t.Errorf("%s should decode as true, got %v (%v)", in, b, err)
+		}
+	}
+	for _, in := range []string{"false", "0", `"0"`, "null", `""`} {
+		if err := b.UnmarshalJSON([]byte(in)); err != nil || bool(b) {
+			t.Errorf("%s should decode as false, got %v (%v)", in, b, err)
+		}
+	}
+	var s vchasno.FlexString
+	for in, want := range map[string]string{`"ready"`: "ready", "200": "200", "null": ""} {
+		if err := s.UnmarshalJSON([]byte(in)); err != nil || s.String() != want {
+			t.Errorf("%s should decode as %q, got %q (%v)", in, want, s, err)
+		}
+	}
+}
