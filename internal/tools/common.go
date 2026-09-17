@@ -26,6 +26,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/david-dvinskykh/vchasno-edo-mcp/internal/config"
+	"github.com/david-dvinskykh/vchasno-edo-mcp/internal/filestore"
 	"github.com/david-dvinskykh/vchasno-edo-mcp/internal/session"
 	"github.com/david-dvinskykh/vchasno-edo-mcp/internal/vchasno"
 )
@@ -38,15 +39,20 @@ type Deps struct {
 	Sess   *session.Session
 	Cfg    config.Config
 	Logger *slog.Logger
+
+	// Files turns a downloaded document into a link instead of bytes in the
+	// answer. It may be nil in a bare test; downloads then say so rather than
+	// silently inlining megabytes.
+	Files *filestore.Store
 }
 
 // NewServer builds an MCP server bound to one Vchasno company session with
 // every tool, resource and prompt registered.
-func NewServer(sess *session.Session, cfg config.Config, logger *slog.Logger) *mcp.Server {
+func NewServer(sess *session.Session, cfg config.Config, logger *slog.Logger, files *filestore.Store) *mcp.Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	d := &Deps{Sess: sess, Cfg: cfg, Logger: logger}
+	d := &Deps{Sess: sess, Cfg: cfg, Logger: logger, Files: files}
 	srv := mcp.NewServer(&mcp.Implementation{Name: "vchasno-edo-mcp", Version: Version}, &mcp.ServerOptions{
 		Instructions: instructions(sess, cfg),
 	})
@@ -80,6 +86,7 @@ func instructions(sess *session.Session, cfg config.Config) string {
 	b.WriteString("Anywhere a role id, label id, team id or document type is wanted you may pass the employee email, label name, team name or type title instead. ")
 	b.WriteString("Typical flows: upload_document → set_document_recipient → send_document → poll list_documents; ")
 	b.WriteString("sync_changed_documents for incremental integration; download_document for the original, the signed ZIP or the .p7s container. ")
+	b.WriteString("Downloads answer with a short-lived URL, never with the bytes: fetch that URL directly instead of pulling a multi-megabyte file through the conversation. ")
 	b.WriteString("Signing needs a ready detached .p7s (add_signature) or a Vchasno.KEP cloud key (cloud_sign_* tools) — this server never holds private keys. ")
 	b.WriteString("Irreversible tools (delete_document, delete_role, revoke_public_link, reset_user_tokens, activate_integration_trial …) require confirm=true. ")
 	b.WriteString("Rate limit: 10 requests/second per company; the client paces itself, so prefer one paged call over many small ones. ")
@@ -312,24 +319,28 @@ func (d *Deps) readFile(in fileInput) (name string, content []byte, err error) {
 	return name, content, nil
 }
 
-// savedFile is what a download tool answers: where the bytes landed, how big
-// they are and what they are, plus the content itself when it is small enough
-// to be useful inline.
+// savedFile is what a download tool answers: a link to fetch the bytes with,
+// plus enough metadata to decide whether to bother. The bytes themselves stay
+// out of the answer — a signed ZIP of a few megabytes has no business
+// travelling through the conversation.
 type savedFile struct {
-	Path        string `json:"path"`
+	URL         string `json:"url"`
 	Filename    string `json:"filename"`
 	Size        int    `json:"size_bytes"`
 	ContentType string `json:"content_type,omitempty"`
 	SHA256      string `json:"sha256"`
-	Base64      string `json:"base64,omitempty"`
+	ExpiresAt   string `json:"expires_at"`
+	ExpiresIn   string `json:"expires_in"`
 	Text        string `json:"text,omitempty"`
 	Note        string `json:"note,omitempty"`
 }
 
-// maxInline is the largest payload returned inside the tool answer itself.
-const maxInline = 256 << 10
+// maxInlineText is the largest textual payload still worth putting in the
+// answer itself: recognised structured data is usually read, not saved, so a
+// small JSON is more useful inline than behind another round trip.
+const maxInlineText = 64 << 10
 
-func (d *Deps) saveDownload(resp *vchasno.Response, fallbackName string, inline bool) (*savedFile, error) {
+func (d *Deps) saveDownload(resp *vchasno.Response, fallbackName string, inlineText bool) (*savedFile, error) {
 	name := resp.Filename
 	if name == "" {
 		name = fallbackName
@@ -338,24 +349,26 @@ func (d *Deps) saveDownload(resp *vchasno.Response, fallbackName string, inline 
 	if name == "" || name == "." || name == "/" {
 		name = "download.bin"
 	}
-	dir := d.Cfg.DownloadDir
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, fmt.Errorf("cannot create download dir %s: %w", dir, err)
-	}
-	path := filepath.Join(dir, fmt.Sprintf("%d-%s", time.Now().UnixNano(), name))
-	if err := os.WriteFile(path, resp.Body, 0o600); err != nil {
-		return nil, fmt.Errorf("cannot write %s: %w", path, err)
-	}
 	sum := sha256.Sum256(resp.Body)
-	out := &savedFile{Path: path, Filename: name, Size: len(resp.Body), ContentType: resp.ContentType, SHA256: hex.EncodeToString(sum[:])}
-	switch {
-	case isTextual(resp.ContentType) && len(resp.Body) <= maxInline:
+	sha := hex.EncodeToString(sum[:])
+
+	out := &savedFile{Filename: name, Size: len(resp.Body), ContentType: resp.ContentType, SHA256: sha}
+	// Text is small and usually the point of the call, so it may ride along.
+	if inlineText && isTextual(resp.ContentType) && len(resp.Body) <= maxInlineText {
 		out.Text = string(resp.Body)
-	case inline && len(resp.Body) <= maxInline:
-		out.Base64 = base64.StdEncoding.EncodeToString(resp.Body)
-	case inline:
-		out.Note = fmt.Sprintf("file is %d bytes, too large to inline; read it from path", len(resp.Body))
 	}
+	if d.Files == nil {
+		out.Note = "this server has no file store configured, so there is no download link"
+		return out, nil
+	}
+	entry, err := d.Files.Put(name, resp.ContentType, sha, resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	out.URL = strings.TrimRight(d.Cfg.IssuerURL, "/") + "/files/" + entry.ID
+	out.ExpiresAt = entry.Expires.UTC().Format(time.RFC3339)
+	out.ExpiresIn = d.Files.TTL().String()
+	out.Note = "fetch this URL directly; it needs no authentication, works once the link is known, and stops working at expires_at"
 	return out, nil
 }
 

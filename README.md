@@ -52,6 +52,8 @@ MCP-сервер (Model Context Protocol) для сервиса электрон
 ### Файлы
 `download_document` с `format`: `original` · `archive` (ZIP с подписями и инструкцией проверки) · `p7s` · `asic` (евро-подписи) · `pdf` · `xml_pdf`. Плюс `get_download_links`, `upload_document_version`, `delete_document_version`.
 
+**Скачивание отдаёт ссылку, а не байты.** Ответ инструмента — `url`, `filename`, `size_bytes`, `content_type`, `sha256`, `expires_at`; файл клиент забирает сам по этому адресу, и многомегабайтный подписанный архив не проходит через контекст модели. Ссылка живёт `MCP_FILE_TTL_MIN` минут (по умолчанию 60), авторизации не требует — сам идентификатор из 256 бит случайности и есть пропуск, поэтому срок жизни короткий, а ссылку стоит считать одноразовой передачей, а не постоянным адресом. Текстовые форматы (XML, JSON) можно попросить в ответ целиком флагом `inline_text=true`, если они меньше 64 КиБ; бинарники не инлайнятся никогда.
+
 ### Жизненный цикл
 `mark_documents_processed` · `delete_document` · `create_delete_request` / `cancel` / `accept` / `reject` / `list` · `lock_document_deletion` · `archive_documents` / `unarchive_documents` · `upload_scan` · `import_signed_document` (подписанный в другой системе — внешний и внутренний формат) · `upload_archive_visualization` · `attach_child_document` / `detach_child_document`
 
@@ -131,7 +133,8 @@ MCP_PORT=8088 MCP_ISSUER_URL=https://vchasno-mcp.example ./vchasno-edo-mcp
 | `MCP_MAX_RPS` | `8` | Своё ограничение частоты (у Вчасно — 10 запросов/с на компанию) |
 | `MCP_MAX_PAGE_SIZE` / `MCP_DEFAULT_PAGE_SIZE` / `MCP_MAX_PAGES` | `100` / `25` / `20` | Пагинация |
 | `MCP_MAX_UPLOAD_MB` | `15` | Предел размера файла (как у сервиса) |
-| `MCP_DOWNLOAD_DIR` | системный temp | Куда складываются скачанные файлы |
+| `MCP_DOWNLOAD_DIR` | системный temp | Где лежат файлы, отдаваемые по ссылке |
+| `MCP_FILE_TTL_MIN` | `60` | Сколько минут живёт ссылка на скачивание |
 | `MCP_ALLOW_LOCAL_FILES` | `true` | Разрешить `file_path` при загрузке (иначе только base64) |
 | `MCP_API_TIMEOUT_SEC` / `MCP_RETRY_ATTEMPTS` | `90` / `3` | Таймаут и число попыток |
 | `MCP_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
@@ -144,14 +147,14 @@ MCP_PORT=8088 MCP_ISSUER_URL=https://vchasno-mcp.example ./vchasno-edo-mcp
 
 ### Эндпоинты
 
-`/mcp` (Streamable HTTP) · `/health` · `/ready` · `/mcp/openapi.json` · REST-мост `/tools`, `/tools/{name}`, `/resources`, `/resources/read`, `/prompts`, `/prompts/{name}` — для клиентов без MCP (Open WebUI, curl).
+`/mcp` (Streamable HTTP) · `/health` · `/ready` · `/files/{id}` (выдача скачанных файлов, без авторизации, по короткоживущему идентификатору) · `/mcp/openapi.json` · REST-мост `/tools`, `/tools/{name}`, `/resources`, `/resources/read`, `/prompts`, `/prompts/{name}` — для клиентов без MCP (Open WebUI, curl).
 
 ---
 
 ## Тесты
 
 ```bash
-go test ./...          # 96 тестов
+go test ./...          # 108 тестов
 go test -race ./...
 ./scripts/smoke.sh     # живая проверка запущенного сервера
 ```

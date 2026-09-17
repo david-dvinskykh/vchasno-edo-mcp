@@ -290,7 +290,8 @@ A document that follows a standard route is simpler: give ` + "`upload_document`
 
 ## Files
 - The original, the signed ZIP, the .p7s, the ASiC, a printable PDF → ` + "`download_document`" + ` with the matching ` + "`format`" + `.
-- Just links to hand over → ` + "`get_download_links`" + `.
+- Every download answers with a **short-lived URL**, not with the bytes. Fetch the url directly; it needs no authentication and expires, so do not store it. Only small XML/JSON can ride along in the answer, and only with ` + "`inline_text=true`" + `.
+- Links Vchasno itself hands out → ` + "`get_download_links`" + `. Those point at the Vchasno API and still need the company token, so they are for passing to something that has one — not for fetching here.
 
 ## Access
 - Who may see a document → ` + "`set_document_access`" + ` (private/extended) and ` + "`set_document_viewers`" + ` (people and teams).
@@ -435,6 +436,9 @@ There are exactly two ways, and neither puts a private key on this server:
 2. **A Vchasno.KEP cloud key.** ` + "`cloud_sign_create_session`" + ` → the owner confirms in the app → ` + "`cloud_sign_check_session`" + ` returns the token **once** → ` + "`cloud_sign_document`" + `. The address this server calls from must be in the employee's ` + "`allowed_api_ips`" + `.
 
 Either way, signing does not send the document: ` + "`send_document`" + ` does.
+
+## Downloads
+A tool that fetches a file stores it on this server and answers with ` + "`url`" + `, ` + "`filename`" + `, ` + "`size_bytes`" + `, ` + "`content_type`" + `, ` + "`sha256`" + ` and ` + "`expires_at`" + `. The bytes never enter the conversation. The link carries its own authority — 256 bits of randomness, no further check — so it is short-lived by design: treat it as a one-time handover, not as a stable address.
 
 ## Pagination
 The listing tools walk cursor pages for you — ` + "`limit`" + ` says how many documents you want, ` + "`pages`" + ` how many pages they may walk to get there. When the answer carries ` + "`next_cursor`" + `, more is waiting behind it.

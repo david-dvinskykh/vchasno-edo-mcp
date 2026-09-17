@@ -12,6 +12,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -20,6 +22,7 @@ import (
 
 	"github.com/david-dvinskykh/vchasno-edo-mcp/internal/auth"
 	"github.com/david-dvinskykh/vchasno-edo-mcp/internal/config"
+	"github.com/david-dvinskykh/vchasno-edo-mcp/internal/filestore"
 	"github.com/david-dvinskykh/vchasno-edo-mcp/internal/session"
 	"github.com/david-dvinskykh/vchasno-edo-mcp/internal/tools"
 	"github.com/david-dvinskykh/vchasno-edo-mcp/internal/vchasno"
@@ -32,15 +35,17 @@ type Server struct {
 	OAuth  *auth.Server
 
 	preAuth *session.Session
+	files   *filestore.Store
 
 	mu      sync.Mutex
 	servers map[*session.Session]*mcp.Server
 	byCreds map[string]*session.Session // header-mode sessions keyed by credential hash
 }
 
-// New builds the server. preAuth may be nil.
-func New(cfg config.Config, logger *slog.Logger, oauth *auth.Server, preAuth *session.Session) *Server {
-	return &Server{Cfg: cfg, Logger: logger, OAuth: oauth, preAuth: preAuth, servers: map[*session.Session]*mcp.Server{}, byCreds: map[string]*session.Session{}}
+// New builds the server. preAuth and files may be nil.
+func New(cfg config.Config, logger *slog.Logger, oauth *auth.Server, preAuth *session.Session, files *filestore.Store) *Server {
+	return &Server{Cfg: cfg, Logger: logger, OAuth: oauth, preAuth: preAuth, files: files,
+		servers: map[*session.Session]*mcp.Server{}, byCreds: map[string]*session.Session{}}
 }
 
 type ctxKey int
@@ -54,7 +59,7 @@ func (s *Server) mcpServerFor(sess *session.Session) *mcp.Server {
 	if srv := s.servers[sess]; srv != nil {
 		return srv
 	}
-	srv := tools.NewServer(sess, s.Cfg, s.Logger)
+	srv := tools.NewServer(sess, s.Cfg, s.Logger, s.files)
 	s.servers[sess] = srv
 	return srv
 }
@@ -181,6 +186,12 @@ func (s *Server) Handler() http.Handler {
 
 	mux.Handle("/mcp", s.authMiddleware(mcpHandler))
 	mux.Handle("/mcp/{$}", s.authMiddleware(mcpHandler))
+	// Download links are deliberately outside the auth middleware: the id is
+	// 256 bits of randomness and the entry expires, so the URL itself is the
+	// capability. That is what lets a client fetch a signed ZIP directly
+	// instead of dragging it through the conversation.
+	mux.HandleFunc("GET /files/{id}", s.handleFile)
+	mux.HandleFunc("HEAD /files/{id}", s.handleFile)
 	mux.HandleFunc("GET /mcp/openapi.json", s.handleOpenAPI)
 	mux.Handle("POST /tools/{name}", s.authMiddleware(http.HandlerFunc(s.handleToolCall)))
 	mux.Handle("GET /tools", s.authMiddleware(http.HandlerFunc(s.handleToolList)))
@@ -218,4 +229,32 @@ func (w *statusWriter) Flush() {
 	if f, okc := w.ResponseWriter.(http.Flusher); okc {
 		f.Flush()
 	}
+}
+
+// handleFile serves a downloaded document by the opaque id of its store entry.
+func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
+	if s.files == nil {
+		http.NotFound(w, r)
+		return
+	}
+	entry, data, ok := s.files.Open(r.PathValue("id"))
+	if !ok {
+		// An expired link and a wrong one answer the same way on purpose.
+		http.Error(w, "no such file, or the link has expired", http.StatusNotFound)
+		return
+	}
+	ct := entry.ContentType
+	if ct == "" {
+		ct = "application/octet-stream"
+	}
+	w.Header().Set("Content-Type", ct)
+	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename*=UTF-8''%s", url.PathEscape(entry.Filename)))
+	w.Header().Set("X-Checksum-SHA256", entry.SHA256)
+	w.Header().Set("Cache-Control", "private, no-store")
+	if r.Method == http.MethodHead {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	_, _ = w.Write(data)
 }

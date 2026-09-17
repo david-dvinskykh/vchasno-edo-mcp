@@ -40,6 +40,7 @@ type Config struct {
 	RetryAttempts  int
 
 	// File exchange.
+	FileTTL      time.Duration // how long a download link stays fetchable
 	DownloadDir  string
 	AllowUploads bool // allow reading files from the local filesystem for uploads
 	ReadOnly     bool // hide every tool that changes data in Vchasno
@@ -72,6 +73,7 @@ func Load() Config {
 		MaxUploadBytes: int64(envInt("MCP_MAX_UPLOAD_MB", 15)) << 20,
 		RetryAttempts:  envInt("MCP_RETRY_ATTEMPTS", 3),
 
+		FileTTL:      time.Duration(envInt("MCP_FILE_TTL_MIN", 60)) * time.Minute,
 		DownloadDir:  env("MCP_DOWNLOAD_DIR", os.TempDir()),
 		AllowUploads: envBool("MCP_ALLOW_LOCAL_FILES", true),
 		ReadOnly:     envBool("MCP_READ_ONLY", false),

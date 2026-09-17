@@ -89,9 +89,9 @@ type extractionListIn struct {
 }
 
 type extractionDownloadIn struct {
-	ID     string `json:"id" jsonschema:"Document id"`
-	Format string `json:"format,omitempty" jsonschema:"json (default), xml or xlsx"`
-	Inline bool   `json:"inline,omitempty" jsonschema:"Also return small files as base64 in the answer. JSON and XML always come back as text"`
+	ID         string `json:"id" jsonschema:"Document id"`
+	Format     string `json:"format,omitempty" jsonschema:"json (default), xml or xlsx"`
+	InlineText bool   `json:"inline_text,omitempty" jsonschema:"Also put the recognised data in the answer when it is JSON or XML under 64 KiB (default: link only)"`
 }
 
 type publicLinkIn struct {
@@ -169,7 +169,7 @@ func (d *Deps) registerLifecycle(srv *mcp.Server) {
 		})
 
 	addRead(srv, "download_structured_data", "Вивантажити структуровані дані",
-		"Export the data recognised from a document — parties with their bank details, line items with quantities, prices and VAT, and the totals — as json, xml or xlsx. Only documents whose recognition is confirmed can be exported; for anything earlier the answer is the current recognition status instead of a file.",
+		"Export the data recognised from a document — parties with their bank details, line items with quantities, prices and VAT, and the totals — as json, xml or xlsx. The answer carries a download URL; pass inline_text=true to also get small JSON or XML in the answer itself. Only documents whose recognition is confirmed can be exported; for anything earlier the answer is the current recognition status instead of a file.",
 		func(ctx context.Context, _ *mcp.CallToolRequest, in extractionDownloadIn) (*mcp.CallToolResult, any, error) {
 			if err := d.requireOpen(); err != nil {
 				return fail(err)
@@ -189,7 +189,7 @@ func (d *Deps) registerLifecycle(srv *mcp.Server) {
 				return ok(map[string]any{"document_id": in.ID, "ready": false, "status": status,
 					"hint": "the data is not exportable yet; it becomes exportable once the recognition is confirmed"})
 			}
-			saved, err := d.saveDownload(resp, in.ID+"-structured."+format, in.Inline)
+			saved, err := d.saveDownload(resp, in.ID+"-structured."+format, in.InlineText)
 			if err != nil {
 				return fail(err)
 			}

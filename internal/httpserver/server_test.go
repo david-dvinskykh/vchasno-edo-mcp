@@ -16,6 +16,7 @@ import (
 
 	"github.com/david-dvinskykh/vchasno-edo-mcp/internal/auth"
 	"github.com/david-dvinskykh/vchasno-edo-mcp/internal/config"
+	"github.com/david-dvinskykh/vchasno-edo-mcp/internal/filestore"
 	"github.com/david-dvinskykh/vchasno-edo-mcp/internal/httpserver"
 	"github.com/david-dvinskykh/vchasno-edo-mcp/internal/mockvchasno"
 	"github.com/david-dvinskykh/vchasno-edo-mcp/internal/session"
@@ -25,6 +26,11 @@ import (
 const apiToken = "test-token"
 
 func newStack(t *testing.T, preAuth bool) (*httptest.Server, string) {
+	srv, mock, _ := newStackWithFiles(t, preAuth)
+	return srv, mock
+}
+
+func newStackWithFiles(t *testing.T, preAuth bool) (*httptest.Server, string, *filestore.Store) {
 	t.Helper()
 	mock := httptest.NewServer(mockvchasno.New(mockvchasno.Options{Token: apiToken}))
 	t.Cleanup(mock.Close)
@@ -55,9 +61,14 @@ func newStack(t *testing.T, preAuth bool) (*httptest.Server, string) {
 	srv.Start()
 	cfg.IssuerURL = srv.URL
 	oauth := auth.NewServer(cfg.IssuerURL, cfg.IssuerURL+"/mcp", auth.NewTokenManager(cfg.IssuerURL, key, 1), connect, logger)
-	srv.Config.Handler = httpserver.New(cfg, logger, oauth, pre).Handler()
+	store, err := filestore.New(t.TempDir(), cfg.FileTTL, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(store.Close)
+	srv.Config.Handler = httpserver.New(cfg, logger, oauth, pre, store).Handler()
 	t.Cleanup(srv.Close)
-	return srv, mock.URL
+	return srv, mock.URL, store
 }
 
 func mcpInitialize(t *testing.T, srvURL string, headers map[string]string) (*http.Response, string) {
@@ -440,4 +451,104 @@ func truncate(s string) string {
 		return s[:200] + "…"
 	}
 	return s
+}
+
+// ── download links ─────────────────────────────────────────────
+
+func TestFileLinkServesTheBytes(t *testing.T) {
+	srv, _, store := newStackWithFiles(t, true)
+	body := []byte("%PDF-1.4 signed act")
+	entry, err := store.Put("акт.pdf", "application/pdf", "abc123", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := http.Get(srv.URL + "/files/" + entry.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+	if string(got) != string(body) {
+		t.Errorf("body mismatch: %q", got)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "application/pdf" {
+		t.Errorf("Content-Type: %q", ct)
+	}
+	if cd := resp.Header.Get("Content-Disposition"); !strings.Contains(cd, "attachment") {
+		t.Errorf("Content-Disposition: %q", cd)
+	}
+	if sum := resp.Header.Get("X-Checksum-SHA256"); sum != "abc123" {
+		t.Errorf("checksum header: %q", sum)
+	}
+}
+
+func TestFileLinkNeedsNoAuthorization(t *testing.T) {
+	// The whole point is that a client without the OAuth token can fetch it.
+	srv, _, store := newStackWithFiles(t, false)
+	entry, err := store.Put("f.bin", "application/octet-stream", "", []byte("payload"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.Get(srv.URL + "/files/" + entry.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("an unauthenticated fetch of a download link got %d", resp.StatusCode)
+	}
+}
+
+func TestFileLinkUnknownAndExpired(t *testing.T) {
+	srv, _, store := newStackWithFiles(t, true)
+	resp, err := http.Get(srv.URL + "/files/definitely-not-an-id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != 404 {
+		t.Errorf("unknown id got %d, want 404", resp.StatusCode)
+	}
+
+	entry, err := store.Put("f.bin", "application/octet-stream", "", []byte("x"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.Forget(entry.ID)
+	gone, err := http.Get(srv.URL + "/files/" + entry.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = gone.Body.Close()
+	if gone.StatusCode != 404 {
+		t.Errorf("a revoked link got %d, want 404", gone.StatusCode)
+	}
+}
+
+func TestFileLinkHead(t *testing.T) {
+	srv, _, store := newStackWithFiles(t, true)
+	entry, err := store.Put("f.bin", "application/octet-stream", "", []byte("12345"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, _ := http.NewRequest(http.MethodHead, srv.URL+"/files/"+entry.ID, nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+	if len(body) != 0 {
+		t.Errorf("HEAD returned a body of %d bytes", len(body))
+	}
+	if resp.Header.Get("Content-Length") != "5" {
+		t.Errorf("Content-Length: %q", resp.Header.Get("Content-Length"))
+	}
 }

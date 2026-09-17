@@ -16,6 +16,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/david-dvinskykh/vchasno-edo-mcp/internal/config"
+	"github.com/david-dvinskykh/vchasno-edo-mcp/internal/filestore"
 	"github.com/david-dvinskykh/vchasno-edo-mcp/internal/mockvchasno"
 	"github.com/david-dvinskykh/vchasno-edo-mcp/internal/session"
 	"github.com/david-dvinskykh/vchasno-edo-mcp/internal/tools"
@@ -23,10 +24,11 @@ import (
 )
 
 type env struct {
-	t    *testing.T
-	mock *mockvchasno.Server
-	cs   *mcp.ClientSession
-	dir  string
+	t     *testing.T
+	mock  *mockvchasno.Server
+	cs    *mcp.ClientSession
+	dir   string
+	files *filestore.Store
 }
 
 func setupWith(t *testing.T, opt mockvchasno.Options, tune func(*config.Config)) *env {
@@ -54,7 +56,12 @@ func setupWith(t *testing.T, opt mockvchasno.Options, tune func(*config.Config))
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	server := tools.NewServer(sess, cfg, logger)
+	store, err := filestore.New(filepath.Join(dir, "files"), cfg.FileTTL, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(store.Close)
+	server := tools.NewServer(sess, cfg, logger, store)
 	ct, st := mcp.NewInMemoryTransports()
 	if _, err := server.Connect(context.Background(), st, nil); err != nil {
 		t.Fatal(err)
@@ -65,7 +72,7 @@ func setupWith(t *testing.T, opt mockvchasno.Options, tune func(*config.Config))
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = cs.Close() })
-	return &env{t: t, mock: mock, cs: cs, dir: dir}
+	return &env{t: t, mock: mock, cs: cs, dir: dir, files: store}
 }
 
 func setup(t *testing.T) *env { return setupWith(t, mockvchasno.Options{}, nil) }
@@ -670,16 +677,37 @@ func TestDownloadFormats(t *testing.T) {
 		if file == nil {
 			t.Fatalf("format %s: no file in the answer: %v", format, out)
 		}
-		path, _ := file["path"].(string)
-		data, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatalf("format %s: the file was not written: %v", format, err)
+		url, _ := file["url"].(string)
+		if url == "" {
+			t.Fatalf("format %s: the answer carries no download url: %v", format, file)
+		}
+		if !strings.Contains(url, "/files/") {
+			t.Errorf("format %s: unexpected url %q", format, url)
+		}
+		if file["sha256"] == nil || file["size_bytes"] == nil || file["expires_at"] == nil {
+			t.Errorf("format %s: the answer lacks the checksum, the size or the expiry", format)
+		}
+		// The bytes must not be in the answer.
+		if file["base64"] != nil {
+			t.Errorf("format %s: base64 is back in the answer", format)
+		}
+		if file["path"] != nil {
+			t.Errorf("format %s: a container-local path leaked into the answer", format)
+		}
+		// The link must actually serve the bytes.
+		id := url[strings.LastIndex(url, "/")+1:]
+		entry, data, ok := e.files.Open(id)
+		if !ok {
+			t.Fatalf("format %s: the store does not know id %s", format, id)
 		}
 		if len(data) == 0 {
-			t.Errorf("format %s: the file is empty", format)
+			t.Errorf("format %s: the stored file is empty", format)
 		}
-		if file["sha256"] == nil || file["size_bytes"] == nil {
-			t.Errorf("format %s: the answer lacks the checksum or the size", format)
+		if got := int(file["size_bytes"].(float64)); got != len(data) {
+			t.Errorf("format %s: size_bytes %d, stored %d", format, got, len(data))
+		}
+		if entry.SHA256 != file["sha256"] {
+			t.Errorf("format %s: checksum mismatch", format)
 		}
 	}
 	if msg := e.callErr("download_document", map[string]any{"id": "doc-006", "format": "docx"}); !strings.Contains(msg, "unknown format") {
@@ -690,12 +718,30 @@ func TestDownloadFormats(t *testing.T) {
 	}
 }
 
-func TestDownloadInline(t *testing.T) {
+func TestDownloadDoesNotInlineBinaries(t *testing.T) {
 	e := setup(t)
-	out := e.call("download_document", map[string]any{"id": "doc-006", "format": "p7s", "inline": true})
+	// Even asking for text inlining must not put a PDF in the answer.
+	out := e.call("download_document", map[string]any{"id": "doc-006", "format": "p7s", "inline_text": true})
 	file := out["file"].(map[string]any)
-	if file["base64"] == nil {
-		t.Errorf("inline=true should return small binaries as base64: %v", file)
+	if file["text"] != nil || file["base64"] != nil {
+		t.Errorf("a binary payload must stay behind the link: %v", file)
+	}
+	if file["url"] == nil {
+		t.Errorf("no url: %v", file)
+	}
+}
+
+func TestDownloadLinkExpires(t *testing.T) {
+	e := setupWith(t, mockvchasno.Options{}, func(c *config.Config) { c.FileTTL = 1 * time.Millisecond })
+	out := e.call("download_document", map[string]any{"id": "doc-006", "format": "original"})
+	url := out["file"].(map[string]any)["url"].(string)
+	id := url[strings.LastIndex(url, "/")+1:]
+	time.Sleep(10 * time.Millisecond)
+	if _, _, ok := e.files.Open(id); ok {
+		t.Error("an expired link still resolves")
+	}
+	if n := e.files.Sweep(); n == 0 {
+		t.Error("the sweep removed nothing although the entry had expired")
 	}
 }
 
@@ -707,7 +753,7 @@ func TestStructuredDataPollingAndExport(t *testing.T) {
 		t.Errorf("recognition is still pending, the export must say so: %v", pending)
 	}
 	e.mock.Confirm("doc-006")
-	ready := e.call("download_structured_data", map[string]any{"id": "doc-006"})
+	ready := e.call("download_structured_data", map[string]any{"id": "doc-006", "inline_text": true})
 	if ready["ready"] != true {
 		t.Fatalf("after confirmation the export should work: %v", ready)
 	}
@@ -816,8 +862,8 @@ func TestActionsReportWaitsAndDownloads(t *testing.T) {
 	if file == nil {
 		t.Fatalf("wait=true should have produced the file: %v", out)
 	}
-	if _, err := os.Stat(file["path"].(string)); err != nil {
-		t.Errorf("the report file was not written: %v", err)
+	if file["url"] == nil {
+		t.Errorf("the report answer carries no download url: %v", file)
 	}
 	if msg := e.callErr("request_actions_report", map[string]any{"date_from": "2026-01-01", "date_to": "2026-06-01"}); !strings.Contains(msg, "30 days") {
 		t.Errorf("an over-long period must be caught before the API call: %s", msg)

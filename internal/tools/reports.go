@@ -15,13 +15,11 @@ type reportIn struct {
 	Kind     string `json:"kind,omitempty" jsonschema:"documents (default) = what happened to documents; users = what employees did"`
 	DateFrom string `json:"date_from" jsonschema:"Start of the period, YYYY-MM-DD. May not be more than a year in the past"`
 	DateTo   string `json:"date_to" jsonschema:"End of the period, YYYY-MM-DD. At most 30 days after date_from"`
-	Wait     bool   `json:"wait,omitempty" jsonschema:"Poll until the report is built and download it in the same call (up to about a minute)"`
-	Inline   bool   `json:"inline,omitempty" jsonschema:"With wait=true: also return the xlsx as base64 when it is small enough"`
+	Wait     bool   `json:"wait,omitempty" jsonschema:"Poll until the report is built and return its download link in the same call (up to about a minute)"`
 }
 
 type reportIDIn struct {
 	ReportID string `json:"report_id" jsonschema:"Report id from request_actions_report"`
-	Inline   bool   `json:"inline,omitempty" jsonschema:"Also return the xlsx as base64 when it is small enough"`
 }
 
 func (d *Deps) registerReports(srv *mcp.Server) {
@@ -63,7 +61,7 @@ func (d *Deps) registerReports(srv *mcp.Server) {
 				out["next_step"] = "poll get_actions_report with this report_id"
 				return ok(out)
 			}
-			saved, status, err := d.waitForReport(ctx, reportID, in.Inline)
+			saved, status, err := d.waitForReport(ctx, reportID, false)
 			if err != nil {
 				out["status"] = status
 				out["error"] = err.Error()
@@ -97,7 +95,7 @@ func (d *Deps) registerReports(srv *mcp.Server) {
 			if name == "" {
 				name = in.ReportID + ".xlsx"
 			}
-			saved, err := d.saveDownload(resp, name, in.Inline)
+			saved, err := d.saveDownload(resp, name, false)
 			if err != nil {
 				return fail(err)
 			}

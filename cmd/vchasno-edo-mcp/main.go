@@ -15,6 +15,7 @@ import (
 
 	"github.com/david-dvinskykh/vchasno-edo-mcp/internal/auth"
 	"github.com/david-dvinskykh/vchasno-edo-mcp/internal/config"
+	"github.com/david-dvinskykh/vchasno-edo-mcp/internal/filestore"
 	"github.com/david-dvinskykh/vchasno-edo-mcp/internal/httpserver"
 	"github.com/david-dvinskykh/vchasno-edo-mcp/internal/session"
 	"github.com/david-dvinskykh/vchasno-edo-mcp/internal/tools"
@@ -72,7 +73,15 @@ func main() {
 	}
 	oauth := auth.NewServer(cfg.IssuerURL, cfg.IssuerURL+"/mcp", auth.NewTokenManager(cfg.IssuerURL, key, cfg.JWTExpiryDays), connect, logger)
 
-	srv := httpserver.New(cfg, logger, oauth, preAuth)
+	files, err := filestore.New(cfg.DownloadDir, cfg.FileTTL, logger)
+	if err != nil {
+		logger.Error("cannot initialise the download store", "err", err)
+		os.Exit(1)
+	}
+	defer files.Close()
+	logger.Info("download links enabled", "dir", cfg.DownloadDir, "ttl", cfg.FileTTL)
+
+	srv := httpserver.New(cfg, logger, oauth, preAuth, files)
 	httpSrv := &http.Server{
 		Addr:              fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
 		Handler:           srv.Handler(),

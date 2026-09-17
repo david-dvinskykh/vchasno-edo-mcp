@@ -61,10 +61,10 @@ type deleteVersionIn struct {
 }
 
 type downloadIn struct {
-	ID      string `json:"id" jsonschema:"Document id"`
-	Format  string `json:"format,omitempty" jsonschema:"original (default) = the file as uploaded; archive = ZIP with the document, every signature and the verification instruction; p7s = one internal_appended container; asic = ASiC container with European (ECDSA) signatures; pdf = printable rendering of a PDF; xml_pdf = PDF rendering of an XML document"`
-	Version string `json:"version,omitempty" jsonschema:"Version id, or 'latest'. Applies to format=original and format=pdf"`
-	Inline  bool   `json:"inline,omitempty" jsonschema:"Also return the bytes as base64 in the answer (only for files up to 256 KiB). Text and JSON payloads are always inlined"`
+	ID         string `json:"id" jsonschema:"Document id"`
+	Format     string `json:"format,omitempty" jsonschema:"original (default) = the file as uploaded; archive = ZIP with the document, every signature and the verification instruction; p7s = one internal_appended container; asic = ASiC container with European (ECDSA) signatures; pdf = printable rendering of a PDF; xml_pdf = PDF rendering of an XML document"`
+	Version    string `json:"version,omitempty" jsonschema:"Version id, or 'latest'. Applies to format=original and format=pdf"`
+	InlineText bool   `json:"inline_text,omitempty" jsonschema:"For textual formats only (XML, JSON): also put the content in the answer when it is under 64 KiB. Binary files are never inlined — use the returned url"`
 
 	WithInstruction *bool  `json:"with_instruction,omitempty" jsonschema:"For the archive format: include the PDF instruction on verifying signatures (default true)"`
 	WithXMLPreview  *bool  `json:"with_xml_preview,omitempty" jsonschema:"For the archive format: include the printable form of an XML document (default true)"`
@@ -80,7 +80,7 @@ type downloadLinksIn struct {
 
 func (d *Deps) registerFiles(srv *mcp.Server) {
 	addRead(srv, "download_document", "Завантажити документ",
-		"Download a document in any format Vchasno offers: the original file, the ZIP with all signatures, the .p7s container, the ASiC container with European signatures, or a printable PDF. The bytes are written to this server's download directory and the answer gives the path, the size and the SHA-256; small text payloads and (with inline=true) small binaries come back in the answer as well.",
+		"Download a document in any format Vchasno offers: the original file, the ZIP with all signatures, the .p7s container, the ASiC container with European signatures, or a printable PDF. The answer is a direct download URL plus the size, content type and SHA-256 — the bytes never travel through the conversation. Fetch the url yourself; it needs no authentication and expires, so use it promptly rather than storing it.",
 		func(ctx context.Context, _ *mcp.CallToolRequest, in downloadIn) (*mcp.CallToolResult, any, error) {
 			if err := d.requireOpen(); err != nil {
 				return fail(err)
@@ -128,7 +128,7 @@ func (d *Deps) registerFiles(srv *mcp.Server) {
 			if err != nil {
 				return fail(err)
 			}
-			saved, err := d.saveDownload(resp, name, in.Inline)
+			saved, err := d.saveDownload(resp, name, in.InlineText)
 			if err != nil {
 				return fail(err)
 			}
