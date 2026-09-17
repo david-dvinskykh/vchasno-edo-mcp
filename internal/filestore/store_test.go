@@ -130,3 +130,24 @@ func TestZeroTTLFallsBackToAnHour(t *testing.T) {
 		t.Errorf("TTL: got %v, want 1h", s.TTL())
 	}
 }
+
+func TestStartupClearsLeftovers(t *testing.T) {
+	// Files survive on a persistent volume but the registry does not, so a
+	// restart must not leave unreachable files behind forever.
+	dir := filepath.Join(t.TempDir(), "files")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stale := filepath.Join(dir, "left-from-last-time")
+	if err := os.WriteFile(stale, []byte("junk"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := filestore.New(dir, time.Hour, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Errorf("the leftover file survived startup: %v", err)
+	}
+}

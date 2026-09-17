@@ -56,6 +56,12 @@ func New(dir string, ttl time.Duration, logger *slog.Logger) (*Store, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("cannot create file store %s: %w", dir, err)
 	}
+	// The registry lives in memory, so files left by a previous process can
+	// never be handed out or swept again — on a persistent volume they would
+	// simply accumulate. Start from an empty directory.
+	if n := clearDir(dir); n > 0 {
+		logger.Info("removed files left by a previous run", "count", n, "dir", dir)
+	}
 	s := &Store{dir: dir, ttl: ttl, logger: logger, entries: map[string]*Entry{}, stop: make(chan struct{})}
 	go s.janitor()
 	return s, nil
@@ -169,4 +175,22 @@ func randomID() (string, error) {
 		return "", err
 	}
 	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+// clearDir removes the store's leftovers from an earlier process.
+func clearDir(dir string) int {
+	items, err := os.ReadDir(dir)
+	if err != nil {
+		return 0
+	}
+	removed := 0
+	for _, item := range items {
+		if item.IsDir() {
+			continue
+		}
+		if os.Remove(filepath.Join(dir, item.Name())) == nil {
+			removed++
+		}
+	}
+	return removed
 }

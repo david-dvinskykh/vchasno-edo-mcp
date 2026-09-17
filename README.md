@@ -154,7 +154,7 @@ MCP_PORT=8088 MCP_ISSUER_URL=https://vchasno-mcp.example ./vchasno-edo-mcp
 ## Тесты
 
 ```bash
-go test ./...          # 108 тестов
+go test ./...          # 109 тестов
 go test -race ./...
 ./scripts/smoke.sh     # живая проверка запущенного сервера
 ```
