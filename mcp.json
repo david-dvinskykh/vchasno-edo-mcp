@@ -1,0 +1,26 @@
+{
+  "mcpServers": {
+    "_comment": "══════ Вчасно.ЕДО MCP Server — Streamable HTTP + OAuth 2.1 ══════",
+    "_comment2": "Same authentication interface as bas-corp-mcp: the token is entered on the OAuth login page in the browser.",
+    "_comment3": "Server returns 401 → client discovers the OAuth endpoints → opens the login page → the user pastes the Вчасно integration token.",
+
+    "vchasno-edo-local": {
+      "type": "http",
+      "url": "http://localhost:8088/mcp"
+    },
+
+    "vchasno-edo-local-header": {
+      "type": "http",
+      "url": "http://localhost:8088/mcp",
+      "headers": {
+        "X-Vchasno-URL": "https://edo.vchasno.ua",
+        "X-Vchasno-Token": "***"
+      }
+    },
+
+    "vchasno-edo-remote": {
+      "type": "http",
+      "url": "https://vchasno-mcp.ha-dvin.pp.ua/mcp"
+    }
+  }
+}

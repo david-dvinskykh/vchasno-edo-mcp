@@ -1,0 +1,7 @@
+# Build output
+/vchasno-edo-mcp
+/dist/
+
+# Runtime state
+*.pem
+*.log
