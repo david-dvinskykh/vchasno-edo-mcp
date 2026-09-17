@@ -20,7 +20,7 @@
 
     "vchasno-edo-remote": {
       "type": "http",
-      "url": "https://vchasno-mcp.ha-dvin.pp.ua/mcp"
+      "url": "https://vchasno-edo-mcp.ha-dvin.pp.ua/mcp"
     }
   }
 }

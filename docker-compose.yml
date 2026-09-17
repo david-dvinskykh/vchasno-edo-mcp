@@ -10,7 +10,7 @@ services:
     environment:
       MCP_HOST: "0.0.0.0"
       MCP_PORT: "8080"
-      MCP_ISSUER_URL: "https://vchasno-mcp.ha-dvin.pp.ua"
+      MCP_ISSUER_URL: "https://vchasno-edo-mcp.ha-dvin.pp.ua"
       MCP_VCHASNO_URL: "https://edo.vchasno.ua"
       MCP_JWT_KEY_DIR: "/app/data"
       MCP_DOWNLOAD_DIR: "/app/data/downloads"

@@ -97,7 +97,7 @@ docker compose up -d          # ghcr.io/david-dvinskykh/vchasno-edo-mcp:latest, 
 | | enote-mcp | bas-corp-mcp | vchasno-edo-mcp |
 |---|---|---|---|
 | Порт на хосте | 8085 | 8087 | **8089** |
-| Публичное имя | enote-mcp.ha-dvin.pp.ua | bas-mcp.ha-dvin.pp.ua | **vchasno-mcp.ha-dvin.pp.ua** |
+| Публичное имя | enote-mcp.ha-dvin.pp.ua | bas-mcp.ha-dvin.pp.ua | **vchasno-edo-mcp.ha-dvin.pp.ua** |
 | Образ | `enote-mcp-server:main` | `bas-corp-mcp:latest` | `vchasno-edo-mcp:latest` |
 
 Образ собирается и публикуется GitHub Actions (`.github/workflows/docker-publish.yml`) при пуше в `main` — linux/amd64 и linux/arm64.
