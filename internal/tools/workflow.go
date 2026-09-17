@@ -288,7 +288,7 @@ func (d *Deps) registerWorkflow(srv *mcp.Server) {
 				} else if id, found := d.Sess.ResolveCategoryID(ctx, in.Category); found {
 					info.Category = &id
 				} else {
-					return failf("unknown document type %q; call list_document_categories", in.Category)
+					return failf("unknown document type %q%s; call list_document_categories", in.Category, d.categoryHint(ctx, in.Category))
 				}
 			}
 			amount, err := amountPtr(in.Amount)

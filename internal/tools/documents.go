@@ -90,7 +90,7 @@ func (d *Deps) buildFilter(ctx context.Context, in listDocumentsIn) (vchasno.Doc
 			notes = append(notes, fmt.Sprintf("document type %q resolved to category %d", c, id))
 			continue
 		}
-		return f, nil, fmt.Errorf("unknown document type %q; call list_document_categories to see the ids", c)
+		return f, nil, fmt.Errorf("unknown document type %q%s; call list_document_categories to see the ids", c, d.categoryHint(ctx, c))
 	}
 	if in.ReviewState != "" {
 		if !contains(vchasno.ReviewStates, in.ReviewState) {

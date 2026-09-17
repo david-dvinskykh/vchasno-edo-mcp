@@ -185,7 +185,7 @@ func (d *Deps) registerFiles(srv *mcp.Server) {
 				} else if id, found := d.Sess.ResolveCategoryID(ctx, in.Category); found {
 					o.Category = &id
 				} else {
-					return failf("unknown document type %q; call list_document_categories", in.Category)
+					return failf("unknown document type %q%s; call list_document_categories", in.Category, d.categoryHint(ctx, in.Category))
 				}
 			}
 			for _, pair := range []struct {
@@ -254,7 +254,7 @@ func (d *Deps) registerFiles(srv *mcp.Server) {
 		})
 
 	mcp.AddTool(srv, &mcp.Tool{Name: "upload_document_version", Annotations: writes("Завантажити версію"),
-		Description: "Add a new version of an existing document (.txt, .doc, .docx, .xls, .xlsx, .pdf). Versions are listed by get_document with with=[\"versions\"] and downloaded by download_document with a version id."},
+		Description: "Add a new version of an existing document (.txt, .doc, .docx, .xls, .xlsx, .pdf). Versions are listed by get_document with with=[\"versions\"] and downloaded by download_document with a version id. Note: the service accepts the upload for any document but only records a version on documents that support versioning, so read the versions back after uploading instead of assuming it stuck."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in uploadVersionIn) (*mcp.CallToolResult, any, error) {
 			if err := d.requireOpen(); err != nil {
 				return fail(err)
@@ -269,7 +269,19 @@ func (d *Deps) registerFiles(srv *mcp.Server) {
 			if err := d.api(ctx).UploadVersion(ctx, in.DocumentID, name, content); err != nil {
 				return fail(err)
 			}
-			return done("version uploaded", map[string]any{"document_id": in.DocumentID, "file": name, "size_bytes": len(content)})
+			// The endpoint answers 200/201 even when it records nothing, so
+			// report what the document actually holds now rather than the
+			// upload's own optimism.
+			out := map[string]any{"document_id": in.DocumentID, "file": name, "size_bytes": len(content)}
+			var f vchasno.DocumentFilter
+			applyWith(&f, []string{"versions"})
+			if doc, derr := d.api(ctx).GetDocument(ctx, in.DocumentID, f); derr == nil {
+				out["versions_now"] = len(doc.Versions)
+				if len(doc.Versions) == 0 {
+					out["warning"] = "the upload was accepted but the document reports no versions; this document does not support versioning"
+				}
+			}
+			return done("version uploaded", out)
 		})
 
 	mcp.AddTool(srv, &mcp.Tool{Name: "delete_document_version", Annotations: destructive("Видалити версію"),

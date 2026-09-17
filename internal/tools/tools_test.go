@@ -1193,3 +1193,57 @@ func TestServerInstructionsMentionKeyRules(t *testing.T) {
 		}
 	}
 }
+
+func TestDocumentedCategorySpellingIsAccepted(t *testing.T) {
+	// The service calls type 15 "Інший" where the API reference writes "Інше".
+	// Both spellings must reach category 15 as long as the company has it.
+	e := setup(t)
+	out := e.call("list_documents", map[string]any{"category": "Акт наданих послуг", "limit": 5, "pages": 5})
+	if out["count"] == nil {
+		t.Fatalf("the live title did not resolve: %v", out)
+	}
+}
+
+func TestUnknownCategorySuggestsCloseOnes(t *testing.T) {
+	e := setup(t)
+	// "Рахуно" is one letter short of the seeded "Рахунок".
+	msg := e.callErr("list_documents", map[string]any{"category": "Рахуно"})
+	if !strings.Contains(msg, "did you mean") {
+		t.Errorf("a near miss should suggest the real titles, got %s", msg)
+	}
+	if !strings.Contains(msg, "Рахунок") {
+		t.Errorf("the suggestion should name the closest type, got %s", msg)
+	}
+}
+
+func TestVersionUploadReportsWhatStuck(t *testing.T) {
+	e := setup(t)
+	path := filepath.Join(e.dir, "ver.pdf")
+	if err := os.WriteFile(path, []byte("%PDF ver"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out := e.call("upload_document_version", map[string]any{"document_id": "doc-001", "file_path": path})
+	if out["versions_now"] == nil {
+		t.Errorf("the answer should report how many versions the document holds now: %v", out)
+	}
+	if fmt.Sprint(out["versions_now"]) != "1" {
+		t.Errorf("versions_now: got %v, want 1", out["versions_now"])
+	}
+	if out["warning"] != nil {
+		t.Errorf("a version that did stick must not warn: %v", out["warning"])
+	}
+}
+
+func TestPartialCategoryIsRefusedNotGuessed(t *testing.T) {
+	// "Рахуно" is a substring of "Розрахунок коригування" as well as a near
+	// miss for "Рахунок". Guessing between them would put the wrong type on a
+	// real document, so the tool must refuse and name the candidates.
+	e := setup(t)
+	msg := e.callErr("list_documents", map[string]any{"category": "Рахуно"})
+	if strings.Contains(msg, "resolved to category") {
+		t.Fatalf("a partial title must not be resolved silently: %s", msg)
+	}
+	if !strings.Contains(msg, "unknown document type") {
+		t.Errorf("unexpected message: %s", msg)
+	}
+}

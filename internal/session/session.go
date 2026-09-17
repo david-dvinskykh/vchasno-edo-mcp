@@ -6,7 +6,9 @@ package session
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -364,17 +366,67 @@ func (s *Session) ResolveCategoryID(ctx context.Context, title string) (int, boo
 	if t == "" {
 		return 0, false
 	}
-	for id, name := range s.Categories(ctx) {
+	cats := s.Categories(ctx)
+	for id, name := range cats {
 		if strings.ToLower(name) == t {
 			return id, true
 		}
 	}
-	for id, name := range s.Categories(ctx) {
-		if strings.Contains(strings.ToLower(name), t) {
-			return id, true
+	// The documented spellings and the live ones do not always agree — the
+	// service calls type 15 "Інший" where the API reference writes "Інше" —
+	// so a documented name is accepted as long as the live list has that id.
+	for id, name := range vchasno.PublicCategories {
+		if strings.ToLower(name) == t {
+			if _, known := cats[id]; known {
+				return id, true
+			}
 		}
 	}
+	// No substring fallback on purpose: "Рахуно" is a substring of
+	// "Розрахунок коригування", and silently stamping the wrong type onto a
+	// real document is worse than refusing. A near miss is answered with
+	// suggestions instead — see SuggestCategories.
 	return 0, false
+}
+
+// SuggestCategories returns the type titles closest to what was asked for, so
+// that a failed lookup can tell the caller what it probably meant.
+func (s *Session) SuggestCategories(ctx context.Context, title string, limit int) []string {
+	t := strings.ToLower(strings.TrimSpace(title))
+	if t == "" {
+		return nil
+	}
+	type scored struct {
+		text  string
+		score int
+	}
+	var best []scored
+	for id, name := range s.Categories(ctx) {
+		n := strings.ToLower(name)
+		score := commonPrefix(t, n)
+		if score < 3 && !strings.Contains(n, t) && !strings.Contains(t, n) {
+			continue
+		}
+		best = append(best, scored{fmt.Sprintf("%d — %s", id, name), score})
+	}
+	sort.Slice(best, func(i, j int) bool { return best[i].score > best[j].score })
+	out := make([]string, 0, limit)
+	for i, b := range best {
+		if i >= limit {
+			break
+		}
+		out = append(out, b.text)
+	}
+	return out
+}
+
+func commonPrefix(a, b string) int {
+	ar, br := []rune(a), []rune(b)
+	n := 0
+	for n < len(ar) && n < len(br) && ar[n] == br[n] {
+		n++
+	}
+	return n
 }
 
 func looksLikeGUID(s string) bool {

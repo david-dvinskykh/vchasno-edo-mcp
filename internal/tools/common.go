@@ -377,3 +377,14 @@ func (d *Deps) requireOpen() error {
 	return &vchasno.Error{Status: 403, Code: "access_denied", Reason: d.Sess.APINote,
 		Details: map[string]any{"fix": "activate the 'Інтеграція' tariff, or its one-time 30-day trial via activate_integration_trial"}}
 }
+
+// categoryHint names the document types closest to one that did not resolve,
+// so a near-miss spelling is corrected in one step instead of a round trip
+// through list_document_categories.
+func (d *Deps) categoryHint(ctx context.Context, asked string) string {
+	near := d.Sess.SuggestCategories(ctx, asked, 3)
+	if len(near) == 0 {
+		return ""
+	}
+	return " (did you mean: " + strings.Join(near, "; ") + ")"
+}
