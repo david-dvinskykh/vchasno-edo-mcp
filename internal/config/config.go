@@ -8,8 +8,12 @@ import (
 	"time"
 )
 
-// DefaultAPIBase is the production host of Vchasno.EDO.
+// DefaultAPIBase is the production host of Vchasno.EDO, used when the
+// license connection leaves its "url" parameter empty.
 const DefaultAPIBase = "https://edo.vchasno.ua"
+
+// LicenseProduct is the product id of this server on the license server.
+const LicenseProduct = "vchasno-mcp"
 
 // Config holds every tunable of the MCP server. All values come from the
 // environment so that the same binary works in Docker, systemd and a plain shell.
@@ -18,15 +22,26 @@ type Config struct {
 	Port      int
 	IssuerURL string // public base URL of this server, used in OAuth metadata and JWT issuer
 
+	// Licensing. The license key decides which Vchasno host a session talks
+	// to (the connection's "url" parameter); the user only supplies the Vchasno
+	// integration token, which never leaves this server.
+	LicenseServerURL string
+	LicensePublicKey string // base64 X.509 SubjectPublicKeyInfo, Ed25519
+
 	// Pre-auth mode: when Token is set, every MCP client shares one Vchasno
-	// company context and OAuth is skipped entirely.
-	BaseURL string
-	Token   string
+	// company context and OAuth is skipped entirely. LicenseKey (and, for a key
+	// with several connections, LicenseConnection) must be set alongside it.
+	Token             string
+	LicenseKey        string
+	LicenseConnection string // connection id or name
 
 	// Header mode: MCP clients may pass credentials in these headers instead of OAuth.
-	HeaderURL   string
-	HeaderToken string
+	HeaderLicenseKey string
+	HeaderConnection string
+	HeaderToken      string
 
+	// JWTKeyDir is the data directory: the RSA key, the license instance id and
+	// the cached signed license payloads live here.
 	JWTKeyDir     string
 	JWTExpiryDays int
 
@@ -56,11 +71,16 @@ func Load() Config {
 		Port:      port,
 		IssuerURL: strings.TrimRight(env("MCP_ISSUER_URL", "http://localhost:"+strconv.Itoa(port)), "/"),
 
-		BaseURL: strings.TrimRight(env("MCP_VCHASNO_URL", DefaultAPIBase), "/"),
-		Token:   env("MCP_VCHASNO_TOKEN", ""),
+		LicenseServerURL: strings.TrimRight(env("MCP_LICENSE_SERVER_URL", ""), "/"),
+		LicensePublicKey: env("MCP_LICENSE_PUBLIC_KEY", ""),
 
-		HeaderURL:   env("MCP_HEADER_URL", "X-Vchasno-URL"),
-		HeaderToken: env("MCP_HEADER_TOKEN", "X-Vchasno-Token"),
+		Token:             env("MCP_VCHASNO_TOKEN", ""),
+		LicenseKey:        env("MCP_LICENSE_KEY", ""),
+		LicenseConnection: env("MCP_LICENSE_CONNECTION", ""),
+
+		HeaderLicenseKey: env("MCP_HEADER_LICENSE_KEY", "X-License-Key"),
+		HeaderConnection: env("MCP_HEADER_CONNECTION", "X-License-Connection"),
+		HeaderToken:      env("MCP_HEADER_TOKEN", "X-Vchasno-Token"),
 
 		JWTKeyDir:     env("MCP_JWT_KEY_DIR", "."),
 		JWTExpiryDays: envInt("MCP_JWT_EXPIRY_DAYS", 365),
@@ -88,6 +108,13 @@ func Load() Config {
 
 // PreAuth reports whether the server runs with a single shared company token.
 func (c Config) PreAuth() bool { return c.Token != "" }
+
+// LicenseConfigured reports whether the license server is configured. Without
+// it the server still starts (so the health check stays green) but refuses
+// every login and every tool call.
+func (c Config) LicenseConfigured() bool {
+	return c.LicenseServerURL != "" && c.LicensePublicKey != ""
+}
 
 func env(key, def string) string {
 	if v, ok := os.LookupEnv(key); ok && strings.TrimSpace(v) != "" {

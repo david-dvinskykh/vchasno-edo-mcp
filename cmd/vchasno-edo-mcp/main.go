@@ -40,30 +40,45 @@ func main() {
 	defer stop()
 
 	logger.Info("vchasno-edo-mcp starting", "version", tools.Version, "issuer", cfg.IssuerURL,
-		"listen", fmt.Sprintf("%s:%d", cfg.Host, cfg.Port), "api", cfg.BaseURL, "read_only", cfg.ReadOnly)
+		"listen", fmt.Sprintf("%s:%d", cfg.Host, cfg.Port), "license_server", cfg.LicenseServerURL, "read_only", cfg.ReadOnly)
 
-	connect := func(ctx context.Context, creds vchasno.Credentials) (*session.Session, error) {
-		return session.Connect(ctx, cfg, creds, logger)
+	// One license manager per process. A missing configuration does not stop
+	// the process (health stays up, so watchtower does not crash-loop it);
+	// every login and tool call is refused with the reason instead.
+	lic := session.NewLicensing(cfg, tools.Version, logger)
+	go lic.Run(ctx)
+
+	connect := func(ctx context.Context, login session.Login) (*session.Session, error) {
+		return session.Open(ctx, cfg, lic, login, logger)
 	}
 
 	var preAuth *session.Session
+	var preAuthErr error
 	if cfg.PreAuth() {
-		logger.Info("pre-auth mode: connecting", "api", cfg.BaseURL)
-		sess, err := connectWithRetry(ctx, connect, vchasno.Credentials{BaseURL: cfg.BaseURL, Token: cfg.Token}, logger)
-		if err != nil {
+		logger.Info("pre-auth mode: connecting", "connection", cfg.LicenseConnection)
+		sess, err := connectWithRetry(ctx, connect, session.Login{LicenseKey: cfg.LicenseKey, Connection: cfg.LicenseConnection, Token: cfg.Token}, logger)
+		switch {
+		case err == nil:
+			preAuth = sess
+			if sess.APIOpen() {
+				logger.Info("pre-auth session ready", "host", sess.Credentials().BaseURL)
+			} else {
+				// Not fatal: the server still answers self_check and get_billing,
+				// which is exactly what somebody debugging this needs.
+				logger.Warn("pre-auth session ready but the company's API is closed", "reason", sess.APINote())
+			}
+		case isLicenseError(err):
+			// Not fatal either: the license may be paid, configured or reachable
+			// later; requests retry and answer with the reason meanwhile.
+			logger.Error("pre-auth: the license does not allow work yet", "err", err)
+			preAuthErr = err
+		default:
 			logger.Error("pre-auth connection failed", "err", err)
 			os.Exit(1)
 		}
-		preAuth = sess
-		if sess.APIOpen {
-			logger.Info("pre-auth session ready")
-		} else {
-			// Not fatal: the server still answers self_check and get_billing,
-			// which is exactly what somebody debugging this needs.
-			logger.Warn("pre-auth session ready but the company's API is closed", "reason", sess.APINote)
-		}
 	} else {
-		logger.Info("auth mode: OAuth 2.1 (JWT tokens) or credential headers", "headers", []string{cfg.HeaderURL, cfg.HeaderToken})
+		logger.Info("auth mode: OAuth 2.1 (JWT tokens) or credential headers",
+			"headers", []string{cfg.HeaderLicenseKey, cfg.HeaderToken, cfg.HeaderConnection})
 	}
 
 	key, err := auth.LoadOrGenerateKey(cfg.JWTKeyDir, logger)
@@ -81,7 +96,10 @@ func main() {
 	defer files.Close()
 	logger.Info("download links enabled", "dir", cfg.DownloadDir, "ttl", cfg.FileTTL)
 
-	srv := httpserver.New(cfg, logger, oauth, preAuth, files)
+	srv := httpserver.New(cfg, logger, oauth, lic, preAuth, files)
+	if preAuthErr != nil {
+		srv.PreAuthFailed(preAuthErr)
+	}
 	httpSrv := &http.Server{
 		Addr:              fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
 		Handler:           srv.Handler(),
@@ -104,14 +122,19 @@ func main() {
 
 // connectWithRetry keeps trying the pre-auth connection: the network or the
 // Vchasno host may be unavailable for a moment when the container starts.
-// An invalid token is not retried — it will not become valid by waiting.
-func connectWithRetry(ctx context.Context, connect func(context.Context, vchasno.Credentials) (*session.Session, error),
-	creds vchasno.Credentials, logger *slog.Logger) (*session.Session, error) {
+// An invalid token is not retried — it will not become valid by waiting — and
+// neither is a license refusal: the license manager has its own retry schedule
+// and the HTTP server retries on demand.
+func connectWithRetry(ctx context.Context, connect func(context.Context, session.Login) (*session.Session, error),
+	login session.Login, logger *slog.Logger) (*session.Session, error) {
 	delay := 3 * time.Second
 	for attempt := 1; ; attempt++ {
-		sess, err := connect(ctx, creds)
+		sess, err := connect(ctx, login)
 		if err == nil {
 			return sess, nil
+		}
+		if isLicenseError(err) {
+			return nil, err
 		}
 		var ae *vchasno.Error
 		if errors.As(err, &ae) && (ae.Status == 401 || ae.Code == "login_required") {
@@ -130,4 +153,9 @@ func connectWithRetry(ctx context.Context, connect func(context.Context, vchasno
 			delay *= 2
 		}
 	}
+}
+
+func isLicenseError(err error) bool {
+	_, ok := session.AsLicenseError(err)
+	return ok
 }

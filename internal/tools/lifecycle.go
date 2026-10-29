@@ -189,7 +189,7 @@ func (d *Deps) registerLifecycle(srv *mcp.Server) {
 				return ok(map[string]any{"document_id": in.ID, "ready": false, "status": status,
 					"hint": "the data is not exportable yet; it becomes exportable once the recognition is confirmed"})
 			}
-			saved, err := d.saveDownload(resp, in.ID+"-structured."+format, in.InlineText)
+			saved, err := d.saveDownload(ctx, resp, in.ID+"-structured."+format, in.InlineText)
 			if err != nil {
 				return fail(err)
 			}

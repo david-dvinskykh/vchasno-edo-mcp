@@ -25,7 +25,6 @@ import (
 	"github.com/david-dvinskykh/vchasno-edo-mcp/internal/filestore"
 	"github.com/david-dvinskykh/vchasno-edo-mcp/internal/session"
 	"github.com/david-dvinskykh/vchasno-edo-mcp/internal/tools"
-	"github.com/david-dvinskykh/vchasno-edo-mcp/internal/vchasno"
 )
 
 // Server holds the HTTP state.
@@ -34,17 +33,25 @@ type Server struct {
 	Logger *slog.Logger
 	OAuth  *auth.Server
 
+	lic   *session.Licensing
+	files *filestore.Store
+
+	// Pre-auth mode: the shared session, opened at start-up or lazily on the
+	// first request when the license (or the network) was not there yet.
+	preMu   sync.Mutex
 	preAuth *session.Session
-	files   *filestore.Store
+	preErr  error
+	preAt   time.Time
 
 	mu      sync.Mutex
 	servers map[*session.Session]*mcp.Server
 	byCreds map[string]*session.Session // header-mode sessions keyed by credential hash
 }
 
-// New builds the server. preAuth and files may be nil.
-func New(cfg config.Config, logger *slog.Logger, oauth *auth.Server, preAuth *session.Session, files *filestore.Store) *Server {
-	return &Server{Cfg: cfg, Logger: logger, OAuth: oauth, preAuth: preAuth, files: files,
+// New builds the server. preAuth and files may be nil; lic is the process-wide
+// license manager (its absence makes every login fail).
+func New(cfg config.Config, logger *slog.Logger, oauth *auth.Server, lic *session.Licensing, preAuth *session.Session, files *filestore.Store) *Server {
+	return &Server{Cfg: cfg, Logger: logger, OAuth: oauth, lic: lic, preAuth: preAuth, files: files,
 		servers: map[*session.Session]*mcp.Server{}, byCreds: map[string]*session.Session{}}
 }
 
@@ -53,6 +60,9 @@ type ctxKey int
 const sessionKey ctxKey = 1
 
 // mcpServerFor returns (creating once) the MCP server bound to a session.
+// This is the single place where a session meets an MCP server — the
+// streamable endpoint and the REST bridge both come through here — so the
+// license gate is installed here and nothing reaches a tool without it.
 func (s *Server) mcpServerFor(sess *session.Session) *mcp.Server {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -60,41 +70,143 @@ func (s *Server) mcpServerFor(sess *session.Session) *mcp.Server {
 		return srv
 	}
 	srv := tools.NewServer(sess, s.Cfg, s.Logger, s.files)
+	srv.AddReceivingMiddleware(licenseGate(sess, s.Logger))
 	s.servers[sess] = srv
 	return srv
 }
 
-// resolveSession applies the three auth modes in order.
-func (s *Server) resolveSession(r *http.Request) (*session.Session, error) {
+// licenseGate refuses every MCP request that touches Vchasno while the
+// session's license is refused, unconfirmed or moved away. A refused tool call
+// answers with a tool error carrying the reason (so the model can tell the
+// user); resource reads and prompts answer with a protocol error. The
+// handshake and the static lists stay open, and so does self_check, which
+// reports the license status itself.
+func licenseGate(sess *session.Session, logger *slog.Logger) mcp.Middleware {
+	return func(next mcp.MethodHandler) mcp.MethodHandler {
+		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+			if ungated(method) {
+				return next(ctx, method, req)
+			}
+			var tool string
+			if ctr, isCall := req.(*mcp.CallToolRequest); isCall && ctr.Params != nil {
+				tool = ctr.Params.Name
+				if tool == "self_check" {
+					return next(ctx, method, req)
+				}
+			}
+			if err := sess.CheckLicense(ctx); err != nil {
+				logger.Warn("request refused by the license gate", "method", method, "tool", tool, "err", err)
+				if method == "tools/call" {
+					return licenseToolError(err), nil
+				}
+				return nil, err
+			}
+			return next(ctx, method, req)
+		}
+	}
+}
+
+func ungated(method string) bool {
+	switch method {
+	case "initialize", "ping", "tools/list", "resources/list", "resources/templates/list", "prompts/list", "logging/setLevel":
+		return true
+	}
+	return strings.HasPrefix(method, "notifications/")
+}
+
+func licenseToolError(err error) *mcp.CallToolResult {
+	body := map[string]any{"error": err.Error(), "hint": "the license does not allow this server to work right now; run self_check for the license status"}
+	if le, isLic := session.AsLicenseError(err); isLic {
+		body["code"] = le.Code
+		if le.Message != "" {
+			body["message"] = le.Message
+		}
+	}
+	data, _ := json.MarshalIndent(body, "", "  ")
+	return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: string(data)}}}
+}
+
+// open is the one way this server opens a session: licensed, through the
+// OAuth server's connector (session.Open).
+func (s *Server) open(ctx context.Context, login session.Login) (*session.Session, error) {
+	return s.OAuth.Connect(ctx, login)
+}
+
+// preAuthRetry is how often a failed pre-auth connection is retried on demand.
+const preAuthRetry = 30 * time.Second
+
+// preAuthSession returns the shared pre-auth session, opening it when it is not
+// open yet (licence or network were unavailable at start-up).
+func (s *Server) preAuthSession(ctx context.Context) (*session.Session, error) {
+	s.preMu.Lock()
+	defer s.preMu.Unlock()
 	if s.preAuth != nil {
 		return s.preAuth, nil
 	}
-	// Header mode: the Vchasno token travels in a header of its own, and the
-	// host may be overridden alongside it.
+	if s.preErr != nil && time.Since(s.preAt) < preAuthRetry {
+		return nil, s.preErr
+	}
+	sess, err := s.open(ctx, session.Login{LicenseKey: s.Cfg.LicenseKey, Connection: s.Cfg.LicenseConnection, Token: s.Cfg.Token})
+	s.preAt = time.Now()
+	if err != nil {
+		s.preErr = err
+		return nil, err
+	}
+	s.preAuth, s.preErr = sess, nil
+	return sess, nil
+}
+
+// PreAuthFailed records why the start-up pre-auth connection failed, so that
+// requests answer with that reason until a retry succeeds.
+func (s *Server) PreAuthFailed(err error) {
+	s.preMu.Lock()
+	s.preErr, s.preAt = err, time.Now()
+	s.preMu.Unlock()
+}
+
+func (s *Server) currentPreAuth() *session.Session {
+	s.preMu.Lock()
+	defer s.preMu.Unlock()
+	return s.preAuth
+}
+
+// resolveSession applies the three auth modes in order. Every mode opens its
+// session through session.Open, so a session exists only for a confirmed
+// license; later requests are gated per call by licenseGate.
+func (s *Server) resolveSession(r *http.Request) (*session.Session, error) {
+	if s.Cfg.PreAuth() {
+		return s.preAuthSession(r.Context())
+	}
+	// Header mode: the license key and the Vchasno token travel in headers of
+	// their own; the connection header picks one of several connections.
 	if tok := strings.TrimSpace(r.Header.Get(s.Cfg.HeaderToken)); tok != "" {
-		host := strings.TrimSpace(r.Header.Get(s.Cfg.HeaderURL))
-		if host == "" {
-			host = s.Cfg.BaseURL
+		key := strings.TrimSpace(r.Header.Get(s.Cfg.HeaderLicenseKey))
+		conn := strings.TrimSpace(r.Header.Get(s.Cfg.HeaderConnection))
+		if key == "" {
+			if err := s.lic.Err(); err != nil {
+				return nil, err
+			}
+			return nil, errUnauthorized{desc: "the " + s.Cfg.HeaderLicenseKey + " header is required together with " + s.Cfg.HeaderToken}
 		}
-		sum := sha256.Sum256([]byte(host + "\x00" + tok))
-		key := hex.EncodeToString(sum[:])
+		sum := sha256.Sum256([]byte(key + "\x00" + conn + "\x00" + tok))
+		ck := hex.EncodeToString(sum[:])
 		s.mu.Lock()
-		sess := s.byCreds[key]
+		sess := s.byCreds[ck]
 		s.mu.Unlock()
 		if sess != nil {
 			return sess, nil
 		}
-		sess, err := session.Connect(r.Context(), s.Cfg, vchasno.Credentials{BaseURL: host, Token: tok}, s.Logger)
+		sess, err := s.open(r.Context(), session.Login{LicenseKey: key, Connection: conn, Token: tok})
 		if err != nil {
 			return nil, err
 		}
 		s.mu.Lock()
-		if existing := s.byCreds[key]; existing != nil {
+		if existing := s.byCreds[ck]; existing != nil {
 			s.mu.Unlock()
 			sess.Close()
 			return existing, nil
 		}
-		s.byCreds[key] = sess
+		s.byCreds[ck] = sess
 		s.mu.Unlock()
 		return sess, nil
 	}
@@ -106,6 +218,9 @@ func (s *Server) resolveSession(r *http.Request) (*session.Session, error) {
 	token := strings.TrimSpace(authz[7:])
 	sess, err := s.OAuth.SessionByToken(r.Context(), token)
 	if err != nil {
+		if _, isLic := session.AsLicenseError(err); isLic {
+			return nil, err
+		}
 		return nil, errUnauthorized{desc: "Invalid or expired access token: " + err.Error()}
 	}
 	return sess, nil
@@ -134,6 +249,10 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 				return
 			}
 			s.Logger.Warn("authentication failed", "err", err)
+			if _, isLic := session.AsLicenseError(err); isLic {
+				http.Error(w, "license check failed: "+err.Error(), http.StatusForbidden)
+				return
+			}
 			http.Error(w, "authentication failed: "+err.Error(), http.StatusForbidden)
 			return
 		}
@@ -154,17 +273,37 @@ func (s *Server) Handler() http.Handler {
 		_, _ = w.Write([]byte("ok"))
 	})
 	mux.HandleFunc("GET /ready", func(w http.ResponseWriter, r *http.Request) {
-		// Ready means "can serve MCP": in pre-auth mode that also requires the
-		// company's API to be open, otherwise every tool would answer 403.
+		// Ready means "can serve MCP": licensing must be configured, and in
+		// pre-auth mode the license must hold and the company's API must be
+		// open, otherwise every tool would answer with an error. /health stays
+		// green regardless, so that the container is not restarted in a loop.
 		w.Header().Set("Content-Type", "application/json")
-		body := map[string]any{"ok": true}
-		if s.preAuth != nil {
-			body["api_open"] = s.preAuth.APIOpen
-			if !s.preAuth.APIOpen {
-				body["ok"] = false
-				body["reason"] = s.preAuth.APINote
-				w.WriteHeader(http.StatusServiceUnavailable)
+		body := map[string]any{"ok": true, "license_configured": s.lic.Err() == nil}
+		fail := func(reason string) {
+			body["ok"] = false
+			body["reason"] = reason
+		}
+		if err := s.lic.Err(); err != nil {
+			fail(err.Error())
+		} else if s.Cfg.PreAuth() {
+			sess, err := s.preAuthSession(r.Context())
+			switch {
+			case err != nil:
+				fail(err.Error())
+			default:
+				if lerr := sess.CheckLicense(r.Context()); lerr != nil {
+					fail(lerr.Error())
+				} else if !sess.APIOpen() {
+					fail(sess.APINote())
+				}
+				body["api_open"] = sess.APIOpen()
+				st := sess.LicenseStatus()
+				body["license"] = map[string]any{"ok": st.OK, "license_id": st.LicenseID, "connection": st.Connection,
+					"valid_until": st.ValidUntil, "warnings": st.Warnings}
 			}
+		}
+		if body["ok"] != true {
+			w.WriteHeader(http.StatusServiceUnavailable)
 		}
 		_ = json.NewEncoder(w).Encode(body)
 	})
@@ -172,9 +311,11 @@ func (s *Server) Handler() http.Handler {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"name": "vchasno-edo-mcp", "version": tools.Version, "mcp": s.Cfg.IssuerURL + "/mcp", "openapi": s.Cfg.IssuerURL + "/mcp/openapi.json",
 			"read_only": s.Cfg.ReadOnly,
-			"auth":      map[string]any{"pre_auth": s.preAuth != nil, "headers": []string{s.Cfg.HeaderURL, s.Cfg.HeaderToken}, "oauth": s.Cfg.IssuerURL + "/.well-known/oauth-authorization-server"}})
+			"license":   map[string]any{"configured": s.lic.Err() == nil, "product": config.LicenseProduct, "instance_id": s.lic.InstanceID()},
+			"auth": map[string]any{"pre_auth": s.Cfg.PreAuth(), "headers": []string{s.Cfg.HeaderLicenseKey, s.Cfg.HeaderToken, s.Cfg.HeaderConnection},
+				"oauth": s.Cfg.IssuerURL + "/.well-known/oauth-authorization-server"}})
 	})
-	s.OAuth.Routes(mux, s.Cfg.BaseURL)
+	s.OAuth.Routes(mux)
 
 	mcpHandler := mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
 		sess := sessionFrom(r)

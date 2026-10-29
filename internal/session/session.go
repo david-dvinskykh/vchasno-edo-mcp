@@ -1,5 +1,5 @@
-// Package session binds one Vchasno company token to a live API client and
-// the slowly-changing company reference data (document types, employees,
+// Package session binds one licensed Vchasno company token to a live API
+// client and the slowly-changing company reference data (document types, employees,
 // labels, extra parameters, teams) that almost every tool needs in order to
 // translate names to ids and codes to meanings.
 package session
@@ -11,26 +11,39 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/david-dvinskykh/vchasno-edo-mcp/internal/config"
+	"github.com/david-dvinskykh/vchasno-edo-mcp/internal/license"
 	"github.com/david-dvinskykh/vchasno-edo-mcp/internal/vchasno"
 )
 
 // Session is one authenticated company context shared by every MCP request
-// that presents the same token.
+// that presents the same credentials (license key + connection + Vchasno token).
+//
+// The Vchasno host is not chosen by the user: it comes from the license
+// connection, and it may change between two daily license checks. That is why
+// the API client lives behind an atomic pointer — CheckLicense swaps it in place
+// when the connection's URL changes, and every MCP server already bound to the
+// session follows without reconnecting.
 type Session struct {
-	Client *vchasno.Client
-	Creds  vchasno.Credentials
 	Cfg    config.Config
 	Logger *slog.Logger
 
-	// APIOpen is false when the token is valid but the company has no active
-	// "Інтеграція" tariff; every data call will then fail with access_denied.
-	APIOpen  bool
-	APINote  string
-	Billing  *vchasno.Billing
 	OpenedAt time.Time
+
+	state atomic.Pointer[apiState]
+
+	// Licensing; nil only for a session opened with Connect (tests, mock).
+	lic        *Licensing
+	login      Login
+	rebindMu   sync.Mutex
+	licMu      sync.Mutex
+	connID     string
+	connName   string
+	lastEnt    *license.Entitlement
+	lastLicErr error
 
 	mu         sync.Mutex
 	categories map[int]string
@@ -45,19 +58,72 @@ type Session struct {
 	groupsAt   time.Time
 }
 
+// apiState is the part of a session that a reconnect replaces as a whole.
+type apiState struct {
+	client *vchasno.Client
+	creds  vchasno.Credentials
+	// apiOpen is false when the token is valid but the company has no active
+	// "Інтеграція" tariff; every data call will then fail with access_denied.
+	apiOpen bool
+	apiNote string
+	billing *vchasno.Billing
+}
+
+// API is the Vchasno client of the session's current connection.
+func (s *Session) API() *vchasno.Client { return s.state.Load().client }
+
+// Credentials are the host and token the session currently talks to.
+func (s *Session) Credentials() vchasno.Credentials { return s.state.Load().creds }
+
+// APIOpen reports whether the company has an API tariff.
+func (s *Session) APIOpen() bool { return s.state.Load().apiOpen }
+
+// APINote explains why the API is closed, when it is.
+func (s *Session) APINote() string { return s.state.Load().apiNote }
+
+// Billing is the tariff information read when the session was (re)connected.
+func (s *Session) Billing() *vchasno.Billing { return s.state.Load().billing }
+
+// MarkAPIOpen records that the API became available (after a trial was
+// activated), so that requireOpen stops refusing.
+func (s *Session) MarkAPIOpen() {
+	for {
+		cur := s.state.Load()
+		next := *cur
+		next.apiOpen, next.apiNote = true, ""
+		if s.state.CompareAndSwap(cur, &next) {
+			return
+		}
+	}
+}
+
 // refTTL is how long company reference data is reused before being refetched.
 const refTTL = 10 * time.Minute
 
-// Connect validates the token and prepares a session.
+// Connect validates the token against the host in creds and prepares a session
+// WITHOUT a license. Production code never calls it directly: every session of
+// the HTTP server is opened by Open, which resolves the host from the license.
+// It exists for tests and for tools that talk to the built-in mock.
 //
 // A token that Vchasno does not recognise is a hard failure. A recognised
 // token on a company without an API tariff is not: the session opens with
-// APIOpen=false so that the server still starts and self_check / get_billing
+// APIOpen()=false so that the server still starts and self_check / get_billing
 // can explain what is missing.
 func Connect(ctx context.Context, cfg config.Config, creds vchasno.Credentials, logger *slog.Logger) (*Session, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
+	st, err := dial(ctx, cfg, creds, logger)
+	if err != nil {
+		return nil, err
+	}
+	s := &Session{Cfg: cfg, Logger: logger, OpenedAt: time.Now()}
+	s.state.Store(st)
+	return s, nil
+}
+
+// dial builds a client for creds and probes the token.
+func dial(ctx context.Context, cfg config.Config, creds vchasno.Credentials, logger *slog.Logger) (*apiState, error) {
 	if strings.TrimSpace(creds.Token) == "" {
 		return nil, &vchasno.Error{Status: 401, Code: "login_required", Reason: "no Vchasno token was provided"}
 	}
@@ -68,13 +134,13 @@ func Connect(ctx context.Context, cfg config.Config, creds vchasno.Credentials, 
 		MaxUpload:     cfg.MaxUploadBytes,
 		Logger:        logger,
 	})
-	s := &Session{Client: client, Creds: client.Creds(), Cfg: cfg, Logger: logger, OpenedAt: time.Now()}
+	st := &apiState{client: client, creds: client.Creds()}
 
 	billing, err := client.GetBilling(ctx)
 	switch {
 	case err == nil:
-		s.APIOpen = true
-		s.Billing = billing
+		st.apiOpen = true
+		st.billing = billing
 	default:
 		ae, ok := err.(*vchasno.Error)
 		if !ok {
@@ -82,12 +148,12 @@ func Connect(ctx context.Context, cfg config.Config, creds vchasno.Credentials, 
 		}
 		switch {
 		case ae.Code == "access_denied" || (ae.Status == 403 && ae.Code == ""):
-			s.APIOpen = false
-			s.APINote = ae.Reason
-			if s.APINote == "" {
-				s.APINote = "the company has no active 'Інтеграція' tariff"
+			st.apiOpen = false
+			st.apiNote = ae.Reason
+			if st.apiNote == "" {
+				st.apiNote = "the company has no active 'Інтеграція' tariff"
 			}
-			logger.Warn("token accepted but API is closed for this company", "reason", s.APINote)
+			logger.Warn("token accepted but API is closed for this company", "reason", st.apiNote)
 		case ae.Status == 401 || ae.Code == "login_required":
 			return nil, err
 		case ae.Status == 404:
@@ -96,12 +162,12 @@ func Connect(ctx context.Context, cfg config.Config, creds vchasno.Credentials, 
 			if _, rerr := client.ListRoles(ctx); rerr != nil {
 				return nil, rerr
 			}
-			s.APIOpen = true
+			st.apiOpen = true
 		default:
 			return nil, err
 		}
 	}
-	return s, nil
+	return st, nil
 }
 
 // Close releases the session. Nothing is held open at the moment; the method
@@ -123,8 +189,8 @@ func (s *Session) Categories(ctx context.Context) map[int]string {
 	for id, title := range vchasno.PublicCategories {
 		merged[id] = title
 	}
-	if s.APIOpen {
-		if live, err := s.Client.ListCategories(ctx); err == nil {
+	if s.APIOpen() {
+		if live, err := s.API().ListCategories(ctx); err == nil {
 			for _, c := range live {
 				merged[c.CategoryID] = c.CategoryTitle
 			}
@@ -147,7 +213,7 @@ func (s *Session) Roles(ctx context.Context) ([]vchasno.Role, error) {
 		return out, nil
 	}
 	s.mu.Unlock()
-	list, err := s.Client.ListRoles(ctx)
+	list, err := s.API().ListRoles(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -166,7 +232,7 @@ func (s *Session) Tags(ctx context.Context) ([]vchasno.Tag, error) {
 		return out, nil
 	}
 	s.mu.Unlock()
-	list, err := s.Client.ListTags(ctx, 200, 0)
+	list, err := s.API().ListTags(ctx, 200, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -185,7 +251,7 @@ func (s *Session) Fields(ctx context.Context) ([]vchasno.Field, error) {
 		return out, nil
 	}
 	s.mu.Unlock()
-	fields, err := s.Client.ListFields(ctx)
+	fields, err := s.API().ListFields(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -204,7 +270,7 @@ func (s *Session) Groups(ctx context.Context) ([]vchasno.Group, error) {
 		return out, nil
 	}
 	s.mu.Unlock()
-	groups, err := s.Client.ListGroups(ctx)
+	groups, err := s.API().ListGroups(ctx)
 	if err != nil {
 		return nil, err
 	}

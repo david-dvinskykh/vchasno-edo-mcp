@@ -2,7 +2,7 @@
   "mcpServers": {
     "_comment": "══════ Вчасно.ЕДО MCP Server — Streamable HTTP + OAuth 2.1 ══════",
     "_comment2": "Same authentication interface as bas-corp-mcp: the token is entered on the OAuth login page in the browser.",
-    "_comment3": "Server returns 401 → client discovers the OAuth endpoints → opens the login page → the user pastes the Вчасно integration token.",
+    "_comment3": "Server returns 401 → client discovers the OAuth endpoints → opens the login page → the user enters the license key and the Вчасно integration token. The Вчасно host comes from the license connection.",
 
     "vchasno-edo-local": {
       "type": "http",
@@ -13,8 +13,9 @@
       "type": "http",
       "url": "http://localhost:8088/mcp",
       "headers": {
-        "X-Vchasno-URL": "https://edo.vchasno.ua",
-        "X-Vchasno-Token": "***"
+        "X-License-Key": "lic_***",
+        "X-Vchasno-Token": "***",
+        "X-License-Connection": "optional: connection id or name when the license has several"
       }
     },
 

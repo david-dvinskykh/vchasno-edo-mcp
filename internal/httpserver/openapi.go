@@ -108,7 +108,7 @@ func (s *Server) handleToolCall(w http.ResponseWriter, r *http.Request) {
 // built from the metadata of any live session; when nothing is live yet it
 // lists the static tool names only.
 func (s *Server) handleOpenAPI(w http.ResponseWriter, r *http.Request) {
-	sess := s.preAuth
+	sess := s.currentPreAuth()
 	if sess == nil {
 		s.mu.Lock()
 		for live := range s.servers {
@@ -136,7 +136,7 @@ func (s *Server) handleOpenAPI(w http.ResponseWriter, r *http.Request) {
 	}
 	spec := map[string]any{
 		"openapi":    "3.1.0",
-		"info":       map[string]any{"title": "Вчасно.ЕДО MCP tools", "version": tools.Version, "description": "Bridge to the Vchasno.EDO document exchange API. Authenticate with the OAuth Bearer token or the X-Vchasno-Token header."},
+		"info":       map[string]any{"title": "Вчасно.ЕДО MCP tools", "version": tools.Version, "description": "Bridge to the Vchasno.EDO document exchange API. Authenticate with the OAuth Bearer token, or with the X-License-Key + X-Vchasno-Token headers (X-License-Connection picks one of several license connections). Every call is subject to the license."},
 		"servers":    []map[string]any{{"url": s.Cfg.IssuerURL}},
 		"paths":      paths,
 		"components": map[string]any{"securitySchemes": map[string]any{"bearerAuth": map[string]any{"type": "http", "scheme": "bearer"}}},

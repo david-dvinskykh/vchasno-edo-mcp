@@ -11,7 +11,10 @@ services:
       MCP_HOST: "0.0.0.0"
       MCP_PORT: "8080"
       MCP_ISSUER_URL: "https://vchasno-edo-mcp.ha-dvin.pp.ua"
-      MCP_VCHASNO_URL: "https://edo.vchasno.ua"
+      # Licensing is mandatory: without these two every login and tool call is
+      # refused (the container still starts and /health stays green).
+      MCP_LICENSE_SERVER_URL: "${MCP_LICENSE_SERVER_URL:-}"
+      MCP_LICENSE_PUBLIC_KEY: "${MCP_LICENSE_PUBLIC_KEY:-}"
       MCP_JWT_KEY_DIR: "/app/data"
       MCP_DOWNLOAD_DIR: "/app/data/downloads"
       MCP_JWT_EXPIRY_DAYS: "365"
@@ -22,8 +25,11 @@ services:
       MCP_MAX_UPLOAD_MB: "15"
       MCP_API_TIMEOUT_SEC: "90"
       MCP_LOG_LEVEL: "info"
-      # MCP_VCHASNO_TOKEN is deliberately absent: every client logs in with its
-      # own token through OAuth. Set it only for a single-company server.
+      # MCP_LICENSE_KEY / MCP_VCHASNO_TOKEN (and MCP_LICENSE_CONNECTION) are
+      # deliberately absent: every client logs in with its own license key and
+      # token through OAuth. Set them only for a single-company server.
+      # /app/data also keeps the license instance id and the cached signed
+      # license answers, so a restart is the same instance on the license server.
     restart: unless-stopped
     volumes:
       - vchasno-mcp-data:/app/data

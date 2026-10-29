@@ -110,8 +110,8 @@ func jsonText(v any) (string, error) {
 
 func (d *Deps) buildOverview(ctx context.Context) (string, error) {
 	out := map[string]any{
-		"host":           d.Sess.Creds.BaseURL,
-		"api_open":       d.Sess.APIOpen,
+		"host":           d.Sess.Credentials().BaseURL,
+		"api_open":       d.Sess.APIOpen(),
 		"read_only_mode": d.Cfg.ReadOnly,
 		"limits": map[string]any{
 			"requests_per_second_allowed_by_vchasno": 10,
@@ -122,8 +122,8 @@ func (d *Deps) buildOverview(ctx context.Context) (string, error) {
 			"max_documents_per_recognition_call":     100,
 		},
 	}
-	if !d.Sess.APIOpen {
-		out["api_closed_reason"] = d.Sess.APINote
+	if !d.Sess.APIOpen() {
+		out["api_closed_reason"] = d.Sess.APINote()
 		out["fix"] = "activate the 'Інтеграція' tariff, or its one-time 30-day trial with activate_integration_trial"
 		return jsonText(out)
 	}

@@ -12,14 +12,15 @@ RUN apk add --no-cache ca-certificates tzdata curl && adduser -D -u 10001 mcp
 WORKDIR /app
 COPY --from=builder /out/vchasno-edo-mcp /app/vchasno-edo-mcp
 
-# The Vchasno token (MCP_VCHASNO_TOKEN) and MCP_ISSUER_URL are passed at run
-# time (env_file / -e), never baked into the image.
+# The license server (MCP_LICENSE_SERVER_URL, MCP_LICENSE_PUBLIC_KEY), the
+# pre-auth credentials (MCP_LICENSE_KEY, MCP_VCHASNO_TOKEN) and MCP_ISSUER_URL
+# are passed at run time (env_file / -e), never baked into the image.
 ENV MCP_HOST=0.0.0.0 \
     MCP_PORT=8080 \
     MCP_JWT_KEY_DIR=/app/data \
     MCP_DOWNLOAD_DIR=/app/data/downloads
-# /app/data keeps the RSA key, so access tokens survive a restart, and the
-# files the download tools write.
+# /app/data keeps the RSA key, so access tokens survive a restart, the license
+# instance id and cached license answers, and the files the download tools write.
 VOLUME ["/app/data"]
 RUN mkdir -p /app/data/downloads && chown -R mcp:mcp /app
 USER mcp

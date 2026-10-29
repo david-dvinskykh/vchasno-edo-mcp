@@ -12,11 +12,11 @@ import (
 	"time"
 
 	"github.com/david-dvinskykh/vchasno-edo-mcp/internal/session"
-	"github.com/david-dvinskykh/vchasno-edo-mcp/internal/vchasno"
 )
 
-// Connector opens a Vchasno session for validated credentials.
-type Connector func(ctx context.Context, creds vchasno.Credentials) (*session.Session, error)
+// Connector opens a licensed Vchasno session (session.Open): it confirms the
+// license, takes the host from the license connection and validates the token.
+type Connector func(ctx context.Context, login session.Login) (*session.Session, error)
 
 // RegisteredClient is a dynamically registered OAuth client (RFC 7591).
 type RegisteredClient struct {
@@ -117,19 +117,23 @@ func (s *Server) ExchangeCode(code, clientID, redirectURI, verifier string) (str
 	if !verifyPKCE(verifier, ac.codeChallenge, ac.codeChallengeMethod) {
 		return "", fmt.Errorf("PKCE verification failed")
 	}
-	token, err := s.Tokens.CreateToken(ac.session.Creds.BaseURL, ac.session.Creds.Token)
+	login := ac.session.Login()
+	token, err := s.Tokens.CreateToken(login.LicenseKey, login.Connection, login.Token)
 	if err != nil {
 		return "", err
 	}
 	s.mu.Lock()
 	s.sessions[token] = ac.session
 	s.mu.Unlock()
-	s.Logger.Info("access token issued", "client_id", clientID, "token", ac.session.Creds.Redacted(), "base", ac.session.Creds.BaseURL)
+	creds := ac.session.Credentials()
+	s.Logger.Info("access token issued", "client_id", clientID, "token", creds.Redacted(), "base", creds.BaseURL)
 	return token, nil
 }
 
 // SessionByToken resolves a Bearer token to a live session, re-creating the
-// session from the token's encrypted Vchasno credentials after a restart.
+// session from the token's encrypted credentials (license key, connection id,
+// Vchasno token) after a restart. A re-created session passes the license
+// check again, so a token cannot outlive its license.
 func (s *Server) SessionByToken(ctx context.Context, token string) (*session.Session, error) {
 	s.mu.Lock()
 	if sess := s.sessions[token]; sess != nil {
@@ -142,7 +146,7 @@ func (s *Server) SessionByToken(ctx context.Context, token string) (*session.Ses
 	if err != nil {
 		return nil, fmt.Errorf("invalid token: %w", err)
 	}
-	sess, err := s.Connect(ctx, vchasno.Credentials{BaseURL: creds.BaseURL, Token: creds.Token})
+	sess, err := s.Connect(ctx, session.Login{LicenseKey: creds.LicenseKey, Connection: creds.Connection, Token: creds.Token})
 	if err != nil {
 		return nil, err
 	}
@@ -154,7 +158,7 @@ func (s *Server) SessionByToken(ctx context.Context, token string) (*session.Ses
 	}
 	s.sessions[token] = sess
 	s.mu.Unlock()
-	s.Logger.Info("session restored from token", "sub", creds.Subject, "base", creds.BaseURL)
+	s.Logger.Info("session restored from token", "sub", creds.Subject, "base", sess.Credentials().BaseURL)
 	return sess, nil
 }
 

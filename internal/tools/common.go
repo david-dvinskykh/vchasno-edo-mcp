@@ -71,9 +71,10 @@ func NewServer(sess *session.Session, cfg config.Config, logger *slog.Logger, fi
 func instructions(sess *session.Session, cfg config.Config) string {
 	var b strings.Builder
 	b.WriteString("Vchasno.EDO (Вчасно.ЕДО) electronic document exchange. ")
-	fmt.Fprintf(&b, "Host: %s. ", sess.Creds.BaseURL)
-	if !sess.APIOpen {
-		fmt.Fprintf(&b, "WARNING: the API is currently closed for this company (%s) — every data call will fail with access_denied until an 'Інтеграція' tariff is active. Start with self_check. ", sess.APINote)
+	b.WriteString("Access is licensed: the license decides the host, and when it is refused or cannot be confirmed every tool answers with the reason — self_check shows the license status. ")
+	fmt.Fprintf(&b, "Host: %s. ", sess.Credentials().BaseURL)
+	if !sess.APIOpen() {
+		fmt.Fprintf(&b, "WARNING: the API is currently closed for this company (%s) — every data call will fail with access_denied until an 'Інтеграція' tariff is active. Start with self_check. ", sess.APINote())
 	}
 	if cfg.ReadOnly {
 		b.WriteString("This server runs READ-ONLY: only tools that read data are registered. ")
@@ -340,7 +341,13 @@ type savedFile struct {
 // small JSON is more useful inline than behind another round trip.
 const maxInlineText = 64 << 10
 
-func (d *Deps) saveDownload(resp *vchasno.Response, fallbackName string, inlineText bool) (*savedFile, error) {
+func (d *Deps) saveDownload(ctx context.Context, resp *vchasno.Response, fallbackName string, inlineText bool) (*savedFile, error) {
+	// A download link outlives the call that issued it, so it is only issued
+	// while the license holds. The tool call itself already passed the gate;
+	// this repeats the (cached) check for anything that calls saveDownload.
+	if err := d.Sess.CheckLicense(ctx); err != nil {
+		return nil, err
+	}
 	name := resp.Filename
 	if name == "" {
 		name = fallbackName
@@ -379,15 +386,15 @@ func isTextual(contentType string) bool {
 
 // ── context ────────────────────────────────────────────────────
 
-func (d *Deps) api(ctx context.Context) *vchasno.Client { return d.Sess.Client }
+func (d *Deps) api(ctx context.Context) *vchasno.Client { return d.Sess.API() }
 
 // requireOpen refuses early, with a useful message, when the company has no
 // API tariff — otherwise every tool would answer with the same raw 403.
 func (d *Deps) requireOpen() error {
-	if d.Sess.APIOpen {
+	if d.Sess.APIOpen() {
 		return nil
 	}
-	return &vchasno.Error{Status: 403, Code: "access_denied", Reason: d.Sess.APINote,
+	return &vchasno.Error{Status: 403, Code: "access_denied", Reason: d.Sess.APINote(),
 		Details: map[string]any{"fix": "activate the 'Інтеграція' tariff, or its one-time 30-day trial via activate_integration_trial"}}
 }
 

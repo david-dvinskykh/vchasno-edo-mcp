@@ -22,10 +22,20 @@ type checkResult struct {
 
 func (d *Deps) registerSelfCheck(srv *mcp.Server) {
 	addRead(srv, "self_check", "Перевірка підключення",
-		"Verify the connection end to end: that the token is accepted, that the company has an API tariff, and that the everyday endpoints (documents, incoming documents, employees, labels, document types, extra parameters, teams) actually answer. Run this first in a new session, and whenever anything starts failing — it turns a raw 403 into the specific thing that is missing.",
+		"Verify the connection end to end: that the license is valid (its id, type, paid-until / expiry date, how long the last confirmation stays valid, warnings, which connection is used — never the key itself), that the token is accepted, that the company has an API tariff, and that the everyday endpoints (documents, incoming documents, employees, labels, document types, extra parameters, teams) actually answer. Run this first in a new session, and whenever anything starts failing — it turns a raw 403 into the specific thing that is missing.",
 		func(ctx context.Context, _ *mcp.CallToolRequest, in struct {
 			Deep bool `json:"deep,omitempty" jsonschema:"Also probe the optional endpoints: scenarios, templates, archive folders, deletion requests, comment feed"`
 		}) (*mcp.CallToolResult, any, error) {
+			// self_check is the one tool the license gate lets through, so that
+			// a refused license is explained instead of only being refused. It
+			// still runs the check itself and stops before touching Vchasno.
+			licErr := d.Sess.CheckLicense(ctx)
+			lic := d.Sess.LicenseStatus()
+			if licErr != nil {
+				return ok(map[string]any{"host": d.Sess.Credentials().BaseURL, "license": lic, "checks": []checkResult{{
+					Name: "license", OK: false, Detail: licErr.Error(),
+					Hint: "the license server refused or could not confirm the license; nothing is sent to Vchasno until it does"}}})
+			}
 			api := d.api(ctx)
 			checks := []checkResult{}
 			add := func(name string, err error, detail string) bool {
@@ -48,7 +58,7 @@ func (d *Deps) registerSelfCheck(srv *mcp.Server) {
 				checks = append(checks, checkResult{Name: "api_access", OK: false,
 					Detail: "the API is closed for this company",
 					Hint:   "activate the 'Інтеграція' tariff in the Vchasno cabinet, or its one-time 30-day trial with activate_integration_trial"})
-				return ok(map[string]any{"host": d.Sess.Creds.BaseURL, "api_open": false, "checks": checks,
+				return ok(map[string]any{"host": d.Sess.Credentials().BaseURL, "license": lic, "api_open": false, "checks": checks,
 					"took": time.Since(started).Round(time.Millisecond).String()})
 			}
 
@@ -97,8 +107,8 @@ func (d *Deps) registerSelfCheck(srv *mcp.Server) {
 				}
 			}
 			return ok(map[string]any{
-				"host": d.Sess.Creds.BaseURL, "api_open": true, "read_only_mode": d.Cfg.ReadOnly,
-				"token": d.Sess.Creds.Redacted(), "passed": passed, "failed": failed,
+				"host": d.Sess.Credentials().BaseURL, "license": lic, "api_open": true, "read_only_mode": d.Cfg.ReadOnly,
+				"token": d.Sess.Credentials().Redacted(), "passed": passed, "failed": failed,
 				"took": time.Since(started).Round(time.Millisecond).String(), "checks": checks,
 			})
 		})

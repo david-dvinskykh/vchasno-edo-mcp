@@ -95,7 +95,7 @@ func (d *Deps) registerReports(srv *mcp.Server) {
 			if name == "" {
 				name = in.ReportID + ".xlsx"
 			}
-			saved, err := d.saveDownload(resp, name, false)
+			saved, err := d.saveDownload(ctx, resp, name, false)
 			if err != nil {
 				return fail(err)
 			}
@@ -124,7 +124,7 @@ func (d *Deps) waitForReport(ctx context.Context, reportID string, inline bool) 
 			if name == "" {
 				name = reportID + ".xlsx"
 			}
-			saved, serr := d.saveDownload(resp, name, inline)
+			saved, serr := d.saveDownload(ctx, resp, name, inline)
 			return saved, status, serr
 		case "not_found":
 			return nil, status, fmt.Errorf("no report with id %s", reportID)

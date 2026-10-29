@@ -864,7 +864,7 @@ func (d *Deps) registerCompany(srv *mcp.Server) {
 			if err != nil {
 				return fail(err)
 			}
-			d.Sess.APIOpen = true
+			d.Sess.MarkAPIOpen()
 			d.Sess.Invalidate()
 			return ok(map[string]any{"ok": true, "result": res, "note": "the API is open for 30 days from now"})
 		})

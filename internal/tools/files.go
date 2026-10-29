@@ -128,7 +128,7 @@ func (d *Deps) registerFiles(srv *mcp.Server) {
 			if err != nil {
 				return fail(err)
 			}
-			saved, err := d.saveDownload(resp, name, in.InlineText)
+			saved, err := d.saveDownload(ctx, resp, name, in.InlineText)
 			if err != nil {
 				return fail(err)
 			}

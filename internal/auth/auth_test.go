@@ -20,7 +20,7 @@ func testKey(t *testing.T) *rsa.PrivateKey {
 
 func TestTokenRoundTrip(t *testing.T) {
 	m := NewTokenManager("https://mcp.example", testKey(t), 30)
-	token, err := m.CreateToken("https://edo.vchasno.ua", "vchasno-api-token")
+	token, err := m.CreateToken("lic_test-key", "conn-1", "vchasno-api-token")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -28,7 +28,7 @@ func TestTokenRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a freshly issued token must validate: %v", err)
 	}
-	if creds.BaseURL != "https://edo.vchasno.ua" || creds.Token != "vchasno-api-token" {
+	if creds.LicenseKey != "lic_test-key" || creds.Connection != "conn-1" || creds.Token != "vchasno-api-token" {
 		t.Errorf("credentials did not survive the round trip: %+v", creds)
 	}
 	if creds.Subject == "vchasno-api-token" {
@@ -38,13 +38,13 @@ func TestTokenRoundTrip(t *testing.T) {
 
 func TestTokenHidesTheAPIToken(t *testing.T) {
 	m := NewTokenManager("https://mcp.example", testKey(t), 30)
-	token, err := m.CreateToken("https://edo.vchasno.ua", "SUPER-SECRET-VCHASNO-TOKEN")
+	token, err := m.CreateToken("lic_SUPER-SECRET-LICENSE", "c", "SUPER-SECRET-VCHASNO-TOKEN")
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The client stores this string; it must not be readable from it.
+	// The client stores this string; neither secret may be readable from it.
 	if strings.Contains(token, "SUPER-SECRET") {
-		t.Fatal("the access token carries the API token in clear text")
+		t.Fatal("the access token carries the API token or the license key in clear text")
 	}
 	decoded, _ := b64.DecodeString(strings.Split(token, ".")[0])
 	if !strings.Contains(string(decoded), "RSA-OAEP-256") {
@@ -55,7 +55,7 @@ func TestTokenHidesTheAPIToken(t *testing.T) {
 func TestTokenRejectsForeignIssuer(t *testing.T) {
 	mine := NewTokenManager("https://mcp.example", testKey(t), 30)
 	theirs := NewTokenManager("https://evil.example", testKey(t), 30)
-	token, err := theirs.CreateToken("https://edo.vchasno.ua", "t")
+	token, err := theirs.CreateToken("lic_k", "", "t")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +69,7 @@ func TestTokenRejectsExpired(t *testing.T) {
 	// A negative expiry falls back to the default, so build the expired case
 	// explicitly through the manager's own clock-independent path.
 	m.expiry = -1
-	token, err := m.CreateToken("https://edo.vchasno.ua", "t")
+	token, err := m.CreateToken("lic_k", "", "t")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,7 +130,7 @@ func TestKeyPersistsAcrossRestarts(t *testing.T) {
 		t.Error("the key was not reused, so tokens would not survive a restart")
 	}
 	// Tokens issued before a restart still validate after it.
-	token, err := NewTokenManager("i", first, 30).CreateToken("https://edo.vchasno.ua", "t")
+	token, err := NewTokenManager("i", first, 30).CreateToken("lic_k", "", "t")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,15 +141,48 @@ func TestKeyPersistsAcrossRestarts(t *testing.T) {
 
 func TestLoginPageRendersFields(t *testing.T) {
 	html := LoginPage(LoginPageParams{ClientID: "cid", RedirectURI: "https://client/cb", State: "st",
-		CodeChallenge: "ch", CodeChallengeMethod: "S256", BaseURL: "https://edo.vchasno.ua", Error: "боom"})
+		CodeChallenge: "ch", CodeChallengeMethod: "S256", LicenseKey: "lic_entered", Token: "tok-entered", Error: "боom"})
 	for _, want := range []string{`name="client_id" value="cid"`, `name="redirect_uri" value="https://client/cb"`,
-		`name="code_challenge" value="ch"`, `name="token"`, "https://edo.vchasno.ua", "боom"} {
+		`name="code_challenge" value="ch"`, `name="token"`, `name="license_key"`, `value="lic_entered"`, `value="tok-entered"`, "боom"} {
 		if !strings.Contains(html, want) {
 			t.Errorf("the login page lacks %q", want)
 		}
 	}
 	if strings.Contains(html, `name="password"`) {
 		t.Error("this server authenticates with a token, not a password")
+	}
+	if strings.Contains(html, `name="base_url"`) || strings.Contains(html, `<select`) {
+		t.Error("the host comes from the license; a key with one connection shows no host field and no select")
+	}
+}
+
+func TestLoginPageRendersConnectionSelect(t *testing.T) {
+	html := LoginPage(LoginPageParams{ClientID: "cid", LicenseKey: "lic_k", Token: "t",
+		Connections: []ConnectionOption{{ID: "c1", Name: "Київ"}, {ID: "c2", Name: "Харків", Selected: true}}})
+	for _, want := range []string{`<select id="connection" name="connection"`, `value="c1"`, `Київ`, `value="c2" selected`, `Харків`} {
+		if !strings.Contains(html, want) {
+			t.Errorf("the connection select lacks %q", want)
+		}
+	}
+}
+
+func TestLicenseTokenWithoutKeyIsRejected(t *testing.T) {
+	m := NewTokenManager("https://mcp.example", testKey(t), 30)
+	token, err := m.CreateToken("", "", "t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Validate(token); err == nil {
+		t.Error("a token without a license key must not validate")
+	}
+}
+
+func TestLicenseRefusalIsExplainedInUkrainian(t *testing.T) {
+	got := licenseRefusalUA("UNPAID", "оплатіть рахунок")
+	for _, want := range []string{"не оплачено", "UNPAID", "оплатіть рахунок"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("%q lacks %q", got, want)
+		}
 	}
 }
 

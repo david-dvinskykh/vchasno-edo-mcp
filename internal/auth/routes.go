@@ -6,12 +6,13 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/david-dvinskykh/vchasno-edo-mcp/internal/vchasno"
+	"github.com/david-dvinskykh/vchasno-edo-mcp/internal/license"
+	"github.com/david-dvinskykh/vchasno-edo-mcp/internal/session"
 )
 
 // Routes mounts the OAuth discovery, registration, authorization and token
-// endpoints on mux. defaultBaseURL pre-fills the login form.
-func (s *Server) Routes(mux *http.ServeMux, defaultBaseURL string) {
+// endpoints on mux.
+func (s *Server) Routes(mux *http.ServeMux) {
 	writeJSON := func(w http.ResponseWriter, status int, v any) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -82,37 +83,59 @@ func (s *Server) Routes(mux *http.ServeMux, defaultBaseURL string) {
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write([]byte(LoginPage(LoginPageParams{ClientID: q.Get("client_id"), RedirectURI: q.Get("redirect_uri"), State: q.Get("state"),
-			CodeChallenge: q.Get("code_challenge"), CodeChallengeMethod: method, BaseURL: defaultBaseURL})))
+			CodeChallenge: q.Get("code_challenge"), CodeChallengeMethod: method})))
 	})
 
-	// Login form submit: validate 1C credentials, issue code, redirect back.
+	// Login form submit: confirm the license, pick its connection, validate the
+	// Vchasno token against the connection's host, issue a code, redirect back.
 	mux.HandleFunc("POST /authorize/callback", func(w http.ResponseWriter, r *http.Request) {
 		if err := r.ParseForm(); err != nil {
 			http.Error(w, "bad form", 400)
 			return
 		}
 		p := LoginPageParams{ClientID: r.FormValue("client_id"), RedirectURI: r.FormValue("redirect_uri"), State: r.FormValue("state"),
-			CodeChallenge: r.FormValue("code_challenge"), CodeChallengeMethod: r.FormValue("code_challenge_method"), BaseURL: strings.TrimSpace(r.FormValue("base_url"))}
+			CodeChallenge: r.FormValue("code_challenge"), CodeChallengeMethod: r.FormValue("code_challenge_method"),
+			LicenseKey: strings.TrimSpace(r.FormValue("license_key")), Connection: strings.TrimSpace(r.FormValue("connection")),
+			Token: strings.TrimSpace(r.FormValue("token"))}
 		if p.CodeChallengeMethod == "" {
 			p.CodeChallengeMethod = "S256"
 		}
-		apiToken := strings.TrimSpace(r.FormValue("token"))
 		render := func(msg string) {
 			p.Error = msg
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			_, _ = w.Write([]byte(LoginPage(p)))
 		}
 		if !s.IsValidClient(p.ClientID, p.RedirectURI) {
+			p.LicenseKey, p.Token = "", ""
 			render("Невідомий client_id або redirect_uri. Почніть вхід заново з вашого MCP-клієнта.")
 			return
 		}
-		if p.BaseURL == "" || apiToken == "" {
-			render("Адреса сервісу і токен обов'язкові")
+		if p.LicenseKey == "" || p.Token == "" {
+			render("Ліцензійний ключ і токен обов'язкові")
 			return
 		}
-		sess, err := s.Connect(r.Context(), vchasno.Credentials{BaseURL: p.BaseURL, Token: apiToken})
+		sess, err := s.Connect(r.Context(), session.Login{LicenseKey: p.LicenseKey, Connection: p.Connection, Token: p.Token})
 		if err != nil {
-			s.Logger.Warn("login failed", "base", p.BaseURL, "err", err)
+			if le, isLic := session.AsLicenseError(err); isLic {
+				switch le.Code {
+				case session.LicenseChooseConnection:
+					p.Connections = connectionOptions(le.Connections, p.Connection)
+					p.Notice = "Ліцензія має кілька підключень. Оберіть, до якого підключитися, і натисніть «Підключити» ще раз."
+					render("")
+					return
+				case session.LicenseConnection:
+					p.Connection = ""
+					p.Connections = s.connectionChoices(r, p.LicenseKey, "")
+				}
+				s.Logger.Warn("login refused by the license", "code", le.Code, "err", err)
+				render(licenseRefusalUA(le.Code, le.Message))
+				return
+			}
+			s.Logger.Warn("login failed", "err", err)
+			if p.Connection != "" {
+				// Keep the select on screen while the user fixes the token.
+				p.Connections = s.connectionChoices(r, p.LicenseKey, p.Connection)
+			}
 			render("Не вдалося підключитися: " + err.Error())
 			return
 		}
@@ -149,4 +172,29 @@ func (s *Server) Routes(mux *http.ServeMux, defaultBaseURL string) {
 		}
 		writeJSON(w, 200, map[string]any{"access_token": token, "token_type": "Bearer", "expires_in": s.Tokens.ExpirySeconds()})
 	})
+}
+
+// connectionChoices lists the connections of a key with several of them, for
+// re-rendering the select. It asks the connector without a connection and
+// without a token: the license answer is cached, and with several connections
+// the connector stops at "choose one" before it would contact Vchasno.
+func (s *Server) connectionChoices(r *http.Request, licenseKey, selected string) []ConnectionOption {
+	_, err := s.Connect(r.Context(), session.Login{LicenseKey: licenseKey})
+	if le, ok := session.AsLicenseError(err); ok && le.Code == session.LicenseChooseConnection {
+		return connectionOptions(le.Connections, selected)
+	}
+	return nil
+}
+
+func connectionOptions(conns []license.Connection, selected string) []ConnectionOption {
+	out := make([]ConnectionOption, 0, len(conns))
+	for _, c := range conns {
+		name := c.Name
+		if name == "" {
+			name = c.ID
+		}
+		out = append(out, ConnectionOption{ID: c.ID, Name: name,
+			Selected: selected != "" && (c.ID == selected || strings.EqualFold(c.Name, selected))})
+	}
+	return out
 }

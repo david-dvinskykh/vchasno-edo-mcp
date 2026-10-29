@@ -19,7 +19,9 @@ import (
 //
 // Token = JWE(RSA-OAEP-256, A256GCM) wrapping JWS(RS256) wrapping claims.
 // The signature proves the token was issued by this server; the encryption
-// hides the embedded Vchasno API token from the MCP client that stores it.
+// hides the embedded license key and Vchasno API token from the MCP client
+// that stores it. The Vchasno host is not in the token: it comes from the
+// license connection, re-checked once a day.
 type TokenManager struct {
 	issuer string
 	key    *rsa.PrivateKey
@@ -28,10 +30,11 @@ type TokenManager struct {
 
 // Credentials are the claims recovered from a valid token.
 type Credentials struct {
-	BaseURL string
-	Token   string
-	Subject string
-	Expires time.Time
+	LicenseKey string
+	Connection string // license connection id
+	Token      string // Vchasno integration token
+	Subject    string
+	Expires    time.Time
 }
 
 // NewTokenManager creates a manager for the given issuer and key.
@@ -46,27 +49,29 @@ func NewTokenManager(issuer string, key *rsa.PrivateKey, expiryDays int) *TokenM
 func (m *TokenManager) ExpirySeconds() int64 { return int64(m.expiry / time.Second) }
 
 type claims struct {
-	Iss     string `json:"iss"`
-	Sub     string `json:"sub"`
-	BaseURL string `json:"base_url"`
-	Tok     string `json:"tok"`
-	Iat     int64  `json:"iat"`
-	Exp     int64  `json:"exp"`
-	Jti     string `json:"jti"`
+	Iss  string `json:"iss"`
+	Sub  string `json:"sub"`
+	Lic  string `json:"lic"`
+	Conn string `json:"conn,omitempty"`
+	Tok  string `json:"tok"`
+	Iat  int64  `json:"iat"`
+	Exp  int64  `json:"exp"`
+	Jti  string `json:"jti"`
 }
 
 var b64 = base64.RawURLEncoding
 
-// CreateToken builds a signed and encrypted token carrying the credentials.
+// CreateToken builds a signed and encrypted token carrying the credentials:
+// the license key, the chosen license connection id and the Vchasno token.
 // The subject is a fingerprint of the Vchasno token, never the token itself,
 // so that logs and client-side introspection cannot leak it.
-func (m *TokenManager) CreateToken(baseURL, apiToken string) (string, error) {
+func (m *TokenManager) CreateToken(licenseKey, connectionID, apiToken string) (string, error) {
 	now := time.Now()
 	jti := make([]byte, 16)
 	if _, err := rand.Read(jti); err != nil {
 		return "", err
 	}
-	c := claims{Iss: m.issuer, Sub: Fingerprint(apiToken), BaseURL: baseURL, Tok: apiToken,
+	c := claims{Iss: m.issuer, Sub: Fingerprint(apiToken), Lic: licenseKey, Conn: connectionID, Tok: apiToken,
 		Iat: now.Unix(), Exp: now.Add(m.expiry).Unix(), Jti: b64.EncodeToString(jti)}
 	payload, err := json.Marshal(c)
 	if err != nil {
@@ -100,10 +105,12 @@ func (m *TokenManager) Validate(token string) (*Credentials, error) {
 	if c.Exp != 0 && time.Now().After(exp) {
 		return nil, fmt.Errorf("token expired at %s", exp.Format(time.RFC3339))
 	}
-	if c.BaseURL == "" || c.Tok == "" {
-		return nil, fmt.Errorf("token missing credentials")
+	if c.Lic == "" || c.Tok == "" {
+		// Tokens issued before licensing carried a host instead of a license
+		// key; they cannot be honoured and the client has to log in again.
+		return nil, fmt.Errorf("token missing credentials (no license key); log in again")
 	}
-	return &Credentials{BaseURL: c.BaseURL, Token: c.Tok, Subject: c.Sub, Expires: exp}, nil
+	return &Credentials{LicenseKey: c.Lic, Connection: c.Conn, Token: c.Tok, Subject: c.Sub, Expires: exp}, nil
 }
 
 // ── JWS (RS256, compact) ────────────────────────────────────────

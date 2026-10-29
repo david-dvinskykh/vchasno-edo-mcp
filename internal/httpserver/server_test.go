@@ -1,74 +1,27 @@
 package httpserver_test
 
 import (
-	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"io"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
 	"strings"
 	"testing"
 
-	"github.com/david-dvinskykh/vchasno-edo-mcp/internal/auth"
-	"github.com/david-dvinskykh/vchasno-edo-mcp/internal/config"
 	"github.com/david-dvinskykh/vchasno-edo-mcp/internal/filestore"
-	"github.com/david-dvinskykh/vchasno-edo-mcp/internal/httpserver"
-	"github.com/david-dvinskykh/vchasno-edo-mcp/internal/mockvchasno"
-	"github.com/david-dvinskykh/vchasno-edo-mcp/internal/session"
-	"github.com/david-dvinskykh/vchasno-edo-mcp/internal/vchasno"
 )
 
-const apiToken = "test-token"
-
 func newStack(t *testing.T, preAuth bool) (*httptest.Server, string) {
-	srv, mock, _ := newStackWithFiles(t, preAuth)
-	return srv, mock
+	st := buildStack(t, stackOptions{preAuth: preAuth})
+	return st.srv, st.mockURL
 }
 
 func newStackWithFiles(t *testing.T, preAuth bool) (*httptest.Server, string, *filestore.Store) {
-	t.Helper()
-	mock := httptest.NewServer(mockvchasno.New(mockvchasno.Options{Token: apiToken}))
-	t.Cleanup(mock.Close)
-
-	cfg := config.Load()
-	cfg.JWTKeyDir = t.TempDir()
-	cfg.DownloadDir = cfg.JWTKeyDir
-	cfg.BaseURL = mock.URL
-	cfg.MaxRPS = 100
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-	connect := func(ctx context.Context, creds vchasno.Credentials) (*session.Session, error) {
-		return session.Connect(ctx, cfg, creds, logger)
-	}
-	var pre *session.Session
-	if preAuth {
-		s, err := connect(context.Background(), vchasno.Credentials{BaseURL: mock.URL, Token: apiToken})
-		if err != nil {
-			t.Fatal(err)
-		}
-		pre = s
-		cfg.Token = apiToken
-	}
-	key, err := auth.LoadOrGenerateKey(cfg.JWTKeyDir, logger)
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv := httptest.NewUnstartedServer(nil)
-	srv.Start()
-	cfg.IssuerURL = srv.URL
-	oauth := auth.NewServer(cfg.IssuerURL, cfg.IssuerURL+"/mcp", auth.NewTokenManager(cfg.IssuerURL, key, 1), connect, logger)
-	store, err := filestore.New(t.TempDir(), cfg.FileTTL, logger)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(store.Close)
-	srv.Config.Handler = httpserver.New(cfg, logger, oauth, pre, store).Handler()
-	t.Cleanup(srv.Close)
-	return srv, mock.URL, store
+	st := buildStack(t, stackOptions{preAuth: preAuth})
+	return st.srv, st.mockURL, st.files
 }
 
 func mcpInitialize(t *testing.T, srvURL string, headers map[string]string) (*http.Response, string) {
@@ -158,16 +111,16 @@ func TestUnauthenticatedIsChallenged(t *testing.T) {
 }
 
 func TestHeaderModeAuthenticates(t *testing.T) {
-	srv, mockURL := newStack(t, false)
-	resp, text := mcpInitialize(t, srv.URL, map[string]string{"X-Vchasno-Token": apiToken, "X-Vchasno-URL": mockURL})
+	srv, _ := newStack(t, false)
+	resp, text := mcpInitialize(t, srv.URL, map[string]string{"X-Vchasno-Token": apiToken, "X-License-Key": licenseKey})
 	if resp.StatusCode != 200 {
 		t.Fatalf("header mode failed: %d %s", resp.StatusCode, text)
 	}
 }
 
 func TestHeaderModeRejectsBadToken(t *testing.T) {
-	srv, mockURL := newStack(t, false)
-	resp, _ := mcpInitialize(t, srv.URL, map[string]string{"X-Vchasno-Token": "wrong", "X-Vchasno-URL": mockURL})
+	srv, _ := newStack(t, false)
+	resp, _ := mcpInitialize(t, srv.URL, map[string]string{"X-Vchasno-Token": "wrong", "X-License-Key": licenseKey})
 	if resp.StatusCode == 200 {
 		t.Fatal("a wrong token was accepted")
 	}
@@ -199,7 +152,7 @@ func TestOAuthDiscovery(t *testing.T) {
 // TestOAuthFullFlow walks the whole authorization code + PKCE exchange the way
 // an MCP client does, and then uses the resulting token against /mcp.
 func TestOAuthFullFlow(t *testing.T) {
-	srv, mockURL := newStack(t, false)
+	srv, _ := newStack(t, false)
 
 	// 1. Dynamic client registration.
 	regBody := `{"client_name":"test client","redirect_uris":["http://localhost:9999/callback"]}`
@@ -237,7 +190,7 @@ func TestOAuthFullFlow(t *testing.T) {
 	// 4. Submitting the form validates the credentials and redirects with a code.
 	form := url.Values{"client_id": {clientID}, "redirect_uri": {"http://localhost:9999/callback"},
 		"state": {"xyz"}, "code_challenge": {challenge}, "code_challenge_method": {"S256"},
-		"base_url": {mockURL}, "token": {apiToken}}
+		"license_key": {licenseKey}, "token": {apiToken}}
 	noRedirect := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	cb, err := noRedirect.PostForm(srv.URL+"/authorize/callback", form)
 	if err != nil {
@@ -273,8 +226,8 @@ func TestOAuthFullFlow(t *testing.T) {
 		t.Fatalf("token exchange failed: %d %v", tr.StatusCode, tok)
 	}
 	access := tok["access_token"].(string)
-	if strings.Contains(access, apiToken) {
-		t.Error("the access token carries the Vchasno token in clear text")
+	if strings.Contains(access, apiToken) || strings.Contains(access, licenseKey) {
+		t.Error("the access token carries the Vchasno token or the license key in clear text")
 	}
 
 	// 6. The token opens /mcp.
@@ -295,7 +248,7 @@ func TestOAuthFullFlow(t *testing.T) {
 }
 
 func TestOAuthRejectsWrongVerifier(t *testing.T) {
-	srv, mockURL := newStack(t, false)
+	srv, _ := newStack(t, false)
 	regBody := `{"client_name":"c","redirect_uris":["http://localhost:9999/cb"]}`
 	resp, _ := http.Post(srv.URL+"/register", "application/json", strings.NewReader(regBody))
 	var reg map[string]any
@@ -306,7 +259,7 @@ func TestOAuthRejectsWrongVerifier(t *testing.T) {
 	sum := sha256.Sum256([]byte("the-real-verifier"))
 	challenge := base64.RawURLEncoding.EncodeToString(sum[:])
 	form := url.Values{"client_id": {clientID}, "redirect_uri": {"http://localhost:9999/cb"},
-		"code_challenge": {challenge}, "code_challenge_method": {"S256"}, "base_url": {mockURL}, "token": {apiToken}}
+		"code_challenge": {challenge}, "code_challenge_method": {"S256"}, "license_key": {licenseKey}, "token": {apiToken}}
 	noRedirect := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	cb, _ := noRedirect.PostForm(srv.URL+"/authorize/callback", form)
 	_ = cb.Body.Close()
@@ -335,7 +288,7 @@ func TestOAuthRejectsUnknownClient(t *testing.T) {
 }
 
 func TestLoginFailsOnBadToken(t *testing.T) {
-	srv, mockURL := newStack(t, false)
+	srv, _ := newStack(t, false)
 	regBody := `{"client_name":"c","redirect_uris":["http://localhost:9999/cb"]}`
 	resp, _ := http.Post(srv.URL+"/register", "application/json", strings.NewReader(regBody))
 	var reg map[string]any
@@ -343,7 +296,7 @@ func TestLoginFailsOnBadToken(t *testing.T) {
 	_ = resp.Body.Close()
 
 	form := url.Values{"client_id": {reg["client_id"].(string)}, "redirect_uri": {"http://localhost:9999/cb"},
-		"code_challenge": {"abc"}, "code_challenge_method": {"S256"}, "base_url": {mockURL}, "token": {"wrong-token"}}
+		"code_challenge": {"abc"}, "code_challenge_method": {"S256"}, "license_key": {licenseKey}, "token": {"wrong-token"}}
 	cb, err := http.PostForm(srv.URL+"/authorize/callback", form)
 	if err != nil {
 		t.Fatal(err)
