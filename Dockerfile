@@ -1,10 +1,20 @@
-# ── Stage 1: build a static binary ─────────────────────────────
-FROM golang:1.25-alpine AS builder
+# ── Stage 1: obfuscated static binary ──────────────────────────
+# Cross-compiled on the native build platform so garble (heavy) never runs under
+# QEMU: it emits the target architecture from one native toolchain run.
+FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS builder
+ARG TARGETOS TARGETARCH
+# garble obfuscates package/type/func names and (with -literals) string literals;
+# pinned to the release that matches this Go toolchain. git is needed by go install.
+RUN apk add --no-cache git && go install mvdan.cc/garble@v0.15.0
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/vchasno-edo-mcp ./cmd/vchasno-edo-mcp
+# garble forces -trimpath; -literals encrypts string literals (header names, messages).
+# The whole binary is obfuscated, not only the licensing package, so the licence
+# check cannot be located and cut out by name. JSON struct tags are preserved, so the
+# wire protocol and the MCP tool schemas are unchanged.
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH garble -literals build -ldflags="-s -w" -o /out/vchasno-edo-mcp ./cmd/vchasno-edo-mcp
 
 # ── Stage 2: minimal runtime (~20 MB image, ~25 MB RSS) ────────
 FROM alpine:3.20
